@@ -3,13 +3,14 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+import tarfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 from pawchive_app.api import PawchiveClient
-from pawchive_app.downloads import DownloadError, resolve_file_url, safe_extract_zip
+from pawchive_app.downloads import DownloadError, resolve_file_url, safe_extract_zip, safe_extract_archive
 from pawchive_app.models import Creator, Post, parse_creator_url
 from pawchive_app.repository import LocalRepository
 
@@ -141,6 +142,32 @@ class DownloadSafetyTests(unittest.TestCase):
                 zipped.writestr("../escape.txt", "unsafe")
             with self.assertRaises(DownloadError):
                 safe_extract_zip(archive, Path(tmp) / "out")
+            self.assertFalse((Path(tmp) / "escape.txt").exists())
+
+    def test_tar_extraction_and_traversal_protection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "safe.tar.gz"
+            source_file = Path(tmp) / "source.txt"
+            source_file.write_text("safe")
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(source_file, arcname="nested/source.txt")
+            output = Path(tmp) / "out"
+            extracted = safe_extract_archive(archive, output)
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual((output / "nested" / "source.txt").read_text(), "safe")
+
+    def test_tar_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.tar"
+            source_file = Path(tmp) / "payload.txt"
+            source_file.write_text("unsafe")
+            with tarfile.open(archive, "w") as tar:
+                info = tarfile.TarInfo("../escape.txt")
+                info.size = source_file.stat().st_size
+                with source_file.open("rb") as payload:
+                    tar.addfile(info, payload)
+            with self.assertRaises(DownloadError):
+                safe_extract_archive(archive, Path(tmp) / "out")
             self.assertFalse((Path(tmp) / "escape.txt").exists())
 
 
