@@ -231,12 +231,18 @@ class PawchiveClient:
         payload = self._get_json(path)
         if isinstance(payload, dict):
             for key in ("tags", "results", "data", "items"):
-                if isinstance(payload.get(key), list):
-                    payload = payload[key]
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    payload = candidate
+                    break
+                if isinstance(candidate, dict):
+                    payload = [{"tag": name} for name in candidate]
                     break
             else:
-                # Some API versions return a tag-to-count mapping.
-                payload = [{"tag": key} for key in payload.keys()]
+                if any(key in payload for key in ("tag", "name", "label", "value")):
+                    payload = [payload]
+                else:
+                    payload = [{"tag": key} for key in payload]
 
         if not isinstance(payload, list):
             return []
@@ -247,7 +253,7 @@ class PawchiveClient:
             if isinstance(item, str):
                 value = item
             elif isinstance(item, dict):
-                value = _tag_value = (
+                value = (
                     item.get("tag") or item.get("name") or item.get("label")
                     or item.get("value") or item.get("id") or ""
                 )
