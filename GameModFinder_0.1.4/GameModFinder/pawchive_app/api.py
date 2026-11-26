@@ -225,13 +225,50 @@ class PawchiveClient:
                  or needle in creator.creator_id.casefold())
         ]
 
+    def creator_tags(self, service: str, creator_id: str) -> list[str]:
+        """Return the Pawchive tags registered for one creator."""
+        path = f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}/tags"
+        payload = self._get_json(path)
+        if isinstance(payload, dict):
+            for key in ("tags", "results", "data", "items"):
+                if isinstance(payload.get(key), list):
+                    payload = payload[key]
+                    break
+            else:
+                # Some API versions return a tag-to-count mapping.
+                payload = [{"tag": key} for key in payload.keys()]
+
+        if not isinstance(payload, list):
+            return []
+
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in payload:
+            if isinstance(item, str):
+                value = item
+            elif isinstance(item, dict):
+                value = _tag_value = (
+                    item.get("tag") or item.get("name") or item.get("label")
+                    or item.get("value") or item.get("id") or ""
+                )
+                if isinstance(value, dict):
+                    value = value.get("name") or value.get("tag") or ""
+            else:
+                continue
+            tag = str(value).strip()
+            key = tag.casefold()
+            if tag and key not in seen:
+                seen.add(key)
+                result.append(tag)
+        return sorted(result, key=str.casefold)
+
     def creator_posts(self, service: str, creator_id: str, offset: int = 0,
-                      query: str | None = None) -> list[Post]:
+                      query: str | None = None, tag: str | None = None) -> list[Post]:
         if offset < 0 or offset % 50:
             raise ValueError("Pawchive offset은 0 이상의 50 단위여야 합니다.")
         path = f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}"
         raw = self._list_payload(
-            self._get_json(path, {"q": query, "o": offset}),
+            self._get_json(path, {"q": query, "tag": tag, "o": offset}),
             "크리에이터 게시물 목록",
         )
         creator = Creator(service=service, creator_id=creator_id)
@@ -244,13 +281,15 @@ class PawchiveClient:
         return result
 
     def all_creator_posts(self, service: str, creator_id: str, query: str | None = None,
-                         max_pages: int | None = None) -> list[Post]:
-        """Fetch every available 50-item page, respecting the one-request/second limit."""
+                         max_pages: int | None = None, tag: str | None = None) -> list[Post]:
+        """Fetch every available 50-item page, optionally restricted to a creator tag."""
         result: list[Post] = []
         offset = 0
         pages = 0
         while max_pages is None or pages < max_pages:
-            page = self.creator_posts(service, creator_id, offset=offset, query=query)
+            page = self.creator_posts(
+                service, creator_id, offset=offset, query=query, tag=tag
+            )
             result.extend(page)
             pages += 1
             if len(page) < 50:
