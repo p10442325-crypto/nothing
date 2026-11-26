@@ -7,7 +7,7 @@ import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .api import APP_USER_AGENT
@@ -19,25 +19,66 @@ class DownloadError(RuntimeError):
     pass
 
 
-def resolve_file_url(path_or_url: str) -> str:
-    value = path_or_url.strip()
+def resolve_file_url(path_or_url: str, filename: str | None = None) -> str:
+    """Resolve an API attachment path to the dedicated Pawchive file host.
+
+    Pawchive API paths are relative to the file server's /data prefix. Some
+    API responses include that prefix already; older/current responses may
+    provide only the hash-directory path. Both forms are accepted.
+    """
+    value = (path_or_url or "").strip()
     if not value:
         raise DownloadError("파일 경로가 비어 있습니다.")
-    if value.startswith(("http://", "https://")):
-        parsed = urlsplit(value)
-        if parsed.scheme != "https" or parsed.hostname != FILES_HOST:
+
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        if (
+            parsed.scheme.lower() != "https"
+            or (parsed.hostname or "").lower() != FILES_HOST
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
             raise DownloadError("Pawchive 파일 서버 주소가 아닙니다.")
-        return value
-    normalized = "/" + value.lstrip("/")
-    if not normalized.startswith("/data/"):
-        raise DownloadError("허용되지 않은 Pawchive 파일 경로입니다.")
-    return f"https://{FILES_HOST}{quote(normalized, safe='/%:@')}"
+        path = parsed.path
+        query = list(parse_qsl(parsed.query, keep_blank_values=True))
+    else:
+        if parsed.netloc:
+            raise DownloadError("파일 경로 형식이 올바르지 않습니다.")
+        path = parsed.path
+        query = list(parse_qsl(parsed.query, keep_blank_values=True))
+
+    decoded = unquote(path).replace("\\", "/")
+    if "\x00" in decoded or any(part in {".", ".."} for part in decoded.split("/")):
+        raise DownloadError("안전하지 않은 Pawchive 파일 경로입니다.")
+    if not decoded.strip("/"):
+        raise DownloadError("Pawchive 파일 경로가 비어 있습니다.")
+
+    normalized = "/" + decoded.lstrip("/")
+    if normalized == "/data" or normalized.startswith("/data/"):
+        pass
+    elif normalized.startswith("/thumbnail/"):
+        raise DownloadError("썸네일 주소는 원본 파일 다운로드 주소로 사용할 수 없습니다.")
+    elif normalized.startswith("/data"):
+        raise DownloadError("Pawchive 파일 경로 형식이 올바르지 않습니다.")
+    else:
+        normalized = "/data" + normalized
+
+    if filename and not any(key == "f" for key, _ in query):
+        query.append(("f", filename))
+    encoded_path = quote(normalized, safe="/:@!$&'()*+,;=-._~")
+    query_string = urlencode(query)
+    return f"https://{FILES_HOST}{encoded_path}" + (f"?{query_string}" if query_string else "")
 
 
-def download_file(path_or_url: str, destination: str | Path, timeout: int = 60,
-                  session_cookie: str | None = None) -> Path:
-    """Download one file; an optional session cookie is sent to the file host only."""
-    url = resolve_file_url(path_or_url)
+def download_file(
+    path_or_url: str,
+    destination: str | Path,
+    timeout: int = 60,
+    session_cookie: str | None = None,
+    filename: str | None = None,
+) -> Path:
+    """Download one file; the optional session cookie is sent to the file host only."""
+    url = resolve_file_url(path_or_url, filename=filename)
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -60,6 +101,10 @@ def download_file(path_or_url: str, destination: str | Path, timeout: int = 60,
         temporary.unlink(missing_ok=True)
         if isinstance(exc, HTTPError) and exc.code in (401, 403):
             raise DownloadError("파일 접근이 거부됐습니다. 해당 파일에 세션 권한이 필요할 수 있습니다.") from exc
+        if isinstance(exc, HTTPError) and exc.code == 404:
+            raise DownloadError(
+                "Pawchive 파일을 찾지 못했습니다(404). 게시물 파일 경로가 변경됐거나 원본 파일이 없을 수 있습니다."
+            ) from exc
         raise DownloadError(f"파일 다운로드 실패: {exc}") from exc
 
 
