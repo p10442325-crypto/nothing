@@ -104,14 +104,33 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(posts[0].post_id, "88")
         self.assertIn("/fanbox/user/1234?o=50", mock_urlopen.call_args.args[0].full_url)
 
+    @patch("pawchive_app.api.urlopen")
+    def test_creator_tags_endpoint_parses_tag_names(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse(json.dumps([
+            "AI", {"name": "3D"}, {"tag": "AI"}, {"label": "Portrait"}
+        ]).encode())
+        tags = PawchiveClient().creator_tags("fanbox", "1234")
+        self.assertEqual(tags, ["3D", "AI", "Portrait"])
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/fanbox/user/1234/tags", request.full_url)
+
+    @patch("pawchive_app.api.urlopen")
+    def test_creator_posts_support_tag_query(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse(json.dumps([
+            {"id": "88", "service": "fanbox", "user": "1234", "title": "Tagged"}
+        ]).encode())
+        posts = PawchiveClient().creator_posts("fanbox", "1234", tag="AI")
+        self.assertEqual(posts[0].title, "Tagged")
+        self.assertIn("tag=AI", mock_urlopen.call_args.args[0].full_url)
+
     def test_invalid_offset_rejected(self):
         with self.assertRaises(ValueError):
             PawchiveClient().creator_posts("fanbox", "1234", offset=1)
 
     def test_all_creator_posts_fetches_past_three_pages(self):
         calls = []
-        def page(_service, _creator_id, offset=0, query=None):
-            calls.append(offset)
+        def page(_service, _creator_id, offset=0, query=None, tag=None):
+            calls.append((offset, tag))
             count = 50 if offset < 100 else 17
             return [
                 Post(service="fanbox", creator_id="1234", post_id=str(offset + index))
@@ -121,7 +140,7 @@ class ApiTests(unittest.TestCase):
         with patch.object(PawchiveClient, "creator_posts", side_effect=page):
             posts = PawchiveClient().all_creator_posts("fanbox", "1234")
 
-        self.assertEqual(calls, [0, 50, 100])
+        self.assertEqual(calls, [(0, None), (50, None), (100, None)])
         self.assertEqual(len(posts), 117)
 
     def test_all_recent_posts_fetches_until_a_short_page(self):
