@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import threading
+import time
 import stat
 import tarfile
 import zipfile
@@ -13,6 +16,20 @@ from urllib.request import Request, urlopen
 from .api import APP_USER_AGENT
 
 FILES_HOST = "file.pawchive.pw"
+_DOWNLOAD_LOCK = threading.Lock()
+_LAST_DOWNLOAD_AT = 0.0
+DOWNLOAD_INTERVAL_SECONDS = 1.0
+
+
+def _wait_download_slot() -> None:
+    """Respect Pawchive's published limit of at most one new file request per second."""
+    global _LAST_DOWNLOAD_AT
+    with _DOWNLOAD_LOCK:
+        wait = DOWNLOAD_INTERVAL_SECONDS - (time.monotonic() - _LAST_DOWNLOAD_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_DOWNLOAD_AT = time.monotonic()
+
 
 
 class DownloadError(RuntimeError):
@@ -97,6 +114,7 @@ def download_file(
         headers["Cookie"] = f"session={session_cookie}"
     request = Request(url, headers=headers, method="GET")
     try:
+        _wait_download_slot()
         with urlopen(request, timeout=timeout) as response, temporary.open("wb") as output:
             if response.status >= 400:
                 raise DownloadError(f"파일 서버 오류: HTTP {response.status}")
@@ -111,7 +129,36 @@ def download_file(
             raise DownloadError(
                 "Pawchive 파일을 찾지 못했습니다(404). 게시물 파일 경로가 변경됐거나 원본 파일이 없을 수 있습니다."
             ) from exc
-        raise DownloadError(f"파일 다운로드 실패: {exc}") from exc
+
+        # Pawchive asks download clients to identify themselves and use HTTP/1.1.
+        # Retry with system curl rather than impersonating a browser.
+        curl = shutil.which("curl.exe") or shutil.which("curl")
+        if curl:
+            try:
+                _wait_download_slot()
+                command = [
+                    curl, "--http1.1", "--fail", "--silent", "--show-error",
+                    "--max-time", str(int(timeout)), "--user-agent", APP_USER_AGENT,
+                    "--header", "Accept: */*",
+                ]
+                if session_cookie:
+                    command.extend(["--header", f"Cookie: session={session_cookie}"])
+                command.extend(["--output", str(temporary), url])
+                result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 5)
+                if result.returncode == 0 and temporary.exists() and temporary.stat().st_size > 0:
+                    os.replace(temporary, target)
+                    return target
+                temporary.unlink(missing_ok=True)
+                detail = (result.stderr or result.stdout or "").strip()
+                raise DownloadError(f"curl 재시도 실패: {detail or result.returncode}")
+            except (OSError, subprocess.SubprocessError) as curl_exc:
+                temporary.unlink(missing_ok=True)
+                raise DownloadError(
+                    f"파일 다운로드 실패: {exc}. 시스템 curl 재시도도 실패했습니다: {curl_exc}"
+                ) from curl_exc
+        raise DownloadError(
+            f"파일 다운로드 실패: {exc}. 시스템 curl을 찾지 못해 대체 전송을 시도할 수 없습니다."
+        ) from exc
 
 
 def _safe_target(root: Path, member_name: str) -> Path:
