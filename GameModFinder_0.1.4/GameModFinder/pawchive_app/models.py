@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.parse import urlparse
+import re
+
+
+def _string(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    return ""
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    name: str
+    path: str
+    kind: str = "attachment"
+
+    @classmethod
+    def from_api(cls, value: Any, kind: str = "attachment") -> "Attachment | None":
+        if not isinstance(value, dict):
+            return None
+        name = _string(value.get("name") or value.get("filename"))
+        path = _string(value.get("path") or value.get("url"))
+        if not path:
+            return None
+        return cls(name=name or path.rsplit("/", 1)[-1], path=path, kind=kind)
+
+
+@dataclass(frozen=True, slots=True)
+class Creator:
+    service: str
+    creator_id: str
+    name: str = ""
+    indexed: str = ""
+    updated: str = ""
+    raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+    @property
+    def key(self) -> str:
+        return f"{self.service}:{self.creator_id}"
+
+    @property
+    def profile_url(self) -> str:
+        return f"https://pawchive.pw/{self.service}/user/{self.creator_id}"
+
+    @classmethod
+    def from_api(cls, value: Any) -> "Creator":
+        if not isinstance(value, dict):
+            raise ValueError("Creator response must be an object")
+        creator_id = _string(value.get("id") or value.get("user_id"))
+        service = _string(value.get("service"))
+        if not creator_id or not service:
+            raise ValueError("Creator response is missing id or service")
+        return cls(
+            service=service,
+            creator_id=creator_id,
+            name=_string(value.get("name") or value.get("username")),
+            indexed=_string(value.get("indexed")),
+            updated=_string(value.get("updated")),
+            raw=dict(value),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Post:
+    service: str
+    creator_id: str
+    post_id: str
+    title: str = ""
+    content: str = ""
+    published: str = ""
+    added: str = ""
+    files: tuple[Attachment, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+    @property
+    def key(self) -> str:
+        return f"{self.service}:{self.creator_id}:{self.post_id}"
+
+    @property
+    def post_url(self) -> str:
+        return (
+            f"https://pawchive.pw/{self.service}/user/{self.creator_id}"
+            f"/post/{self.post_id}"
+        )
+
+    @classmethod
+    def from_api(cls, value: Any, creator: Creator | None = None) -> "Post":
+        if not isinstance(value, dict):
+            raise ValueError("Post response must be an object")
+        service = _string(value.get("service") or (creator.service if creator else ""))
+        creator_id = _string(value.get("user") or value.get("creator_id") or (creator.creator_id if creator else ""))
+        post_id = _string(value.get("id") or value.get("post_id"))
+        if not (service and creator_id and post_id):
+            raise ValueError("Post response is missing service, user, or id")
+
+        found: list[Attachment] = []
+        primary = Attachment.from_api(value.get("file"), "file")
+        if primary:
+            found.append(primary)
+        for item in value.get("attachments") or []:
+            attachment = Attachment.from_api(item)
+            if attachment and attachment.path not in {f.path for f in found}:
+                found.append(attachment)
+        shared = Attachment.from_api(value.get("shared_file"), "shared_file")
+        if shared and shared.path not in {f.path for f in found}:
+            found.append(shared)
+
+        return cls(
+            service=service,
+            creator_id=creator_id,
+            post_id=post_id,
+            title=_string(value.get("title")) or "(제목 없음)",
+            content=_string(value.get("content")),
+            published=_string(value.get("published")),
+            added=_string(value.get("added")),
+            files=tuple(found),
+            raw=dict(value),
+        )
+
+
+_CREATOR_PATH = re.compile(r"^/([^/]+)/user/([^/]+)(?:/post/([^/]+))?/?$")
+
+
+def parse_creator_url(value: str) -> tuple[str, str]:
+    """Parse a Pawchive creator or post URL into (service, creator_id)."""
+    parsed = urlparse(value.strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or host not in {"pawchive.pw", "www.pawchive.pw"}:
+        raise ValueError("Pawchive 주소만 입력할 수 있습니다.")
+    match = _CREATOR_PATH.fullmatch(parsed.path)
+    if not match:
+        raise ValueError("크리에이터 주소 형식이 올바르지 않습니다.")
+    service, creator_id, _post_id = match.groups()
+    return service, creator_id
