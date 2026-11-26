@@ -235,7 +235,7 @@ class PostBrowser(QWidget):
 
     @classmethod
     def _is_archive(cls, filename: str) -> bool:
-        lowered = (filename or "").lower()
+        lowered = (filename or "").split("?", 1)[0].lower()
         return any(lowered.endswith(suffix) for suffix in cls.ARCHIVE_SUFFIXES)
 
     @classmethod
@@ -301,7 +301,10 @@ class PostBrowser(QWidget):
 
         posts = [
             post for post in posts
-            if any(self._is_archive(attachment.name or attachment.path) for attachment in post.files)
+            if any(
+                self._is_archive(attachment.name) or self._is_archive(attachment.path)
+                for attachment in post.files
+            )
         ]
         self.posts = posts
         self.items.clear()
@@ -484,7 +487,7 @@ class PostBrowser(QWidget):
         self._clear_attachment_cards()
         archive_files = [
             attachment for attachment in post.files
-            if self._is_archive(attachment.name or attachment.path)
+            if self._is_archive(attachment.name) or self._is_archive(attachment.path)
         ]
         if not archive_files:
             return
@@ -495,7 +498,7 @@ class PostBrowser(QWidget):
             card.setObjectName("AttachmentCard")
             row = QHBoxLayout(card)
             row.setContentsMargins(9, 7, 9, 7)
-            icon = QLabel("📦" if self._is_archive(attachment.name) else "📎")
+            icon = QLabel("📦")
             icon.setMinimumWidth(28)
             filename = QLabel(attachment.name or attachment.path.rsplit("/", 1)[-1])
             filename.setWordWrap(True)
