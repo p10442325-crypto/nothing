@@ -491,6 +491,7 @@ def install_ui_enhancements(ui_module) -> None:
             layout.removeWidget(old)
             old.deleteLater()
             self.content = PostTextBrowser()
+            self.content.setObjectName("PostContent")
             layout.insertWidget(index, self.content, 1)
 
         def _show_selected(self, row: int) -> None:
