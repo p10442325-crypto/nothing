@@ -61,6 +61,9 @@ class PostRenderingTests(unittest.TestCase):
         self.assertIn("<strong>Important</strong>", post_html)
         self.assertIn("<ul>", post_html)
         self.assertIn("https://img.pawchive.pw/thumbnail/data/f6/bb/abc.png?f=preview.png", post_html)
+        self.assertNotIn("<figcaption>", post_html)
+        self.assertNotIn("preview.png</figcaption>", post_html)
+        self.assertIn("font-size:12pt", post_html)
 
     def test_html_sanitizer_removes_scripts_but_keeps_markup(self):
         post_html = render_post_html("<p><strong>Hello</strong></p><script>alert(1)</script>")
