@@ -11,7 +11,8 @@ from urllib.error import URLError
 from unittest.mock import patch
 
 from pawchive_app.api import PawchiveClient
-from pawchive_app.downloads import DownloadError, download_file, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive
+from pawchive_app.downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
+from pawchive_app.enhancements import pawchive_image_url
 from pawchive_app.models import Creator, Post, parse_creator_url
 from pawchive_app.repository import LocalRepository
 
@@ -192,6 +193,28 @@ class DownloadSafetyTests(unittest.TestCase):
             self.assertEqual(saved.read_bytes(), b"pawchive-test")
             request_url = mock_browser.call_args.args[0]
             self.assertIn("?f=original.bin", request_url)
+
+    def test_html_attachment_path_maps_to_thumbnail_host_with_filename(self):
+        self.assertEqual(
+            pawchive_image_url("/f6/bb/image.jpg", "preview image.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/f6/bb/image.jpg?f=preview+image.jpg",
+        )
+        self.assertEqual(
+            pawchive_image_url("https://pawchive.pw/data/f6/bb/image.jpg", "image.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/f6/bb/image.jpg?f=image.jpg",
+        )
+
+    def test_thumbnail_fetch_uses_browser_and_reuses_cache(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/cache-image.jpg?f=cache-image.jpg"
+        with patch("pawchive_app.downloads._browser_download") as browser:
+            browser.side_effect = lambda _url, destination, _timeout, session_cookie=None: Path(destination).write_bytes(b"thumbnail")
+            with patch("pawchive_app.downloads._THUMB_CACHE_LOCK"):
+                pass
+            result = fetch_thumbnail_bytes(url)
+            again = fetch_thumbnail_bytes(url)
+        self.assertEqual(result, b"thumbnail")
+        self.assertEqual(again, b"thumbnail")
+        browser.assert_called_once()
 
     def test_zip_extracts_inside_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
