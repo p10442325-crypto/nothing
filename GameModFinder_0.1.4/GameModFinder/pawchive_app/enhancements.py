@@ -44,6 +44,7 @@ def pawchive_image_url(path_or_url: str, filename: str = "") -> str:
 
     parsed = urlsplit(value)
     query = list(parse_qsl(parsed.query, keep_blank_values=True))
+    filename = filename or Path(unquote(parsed.path)).name
     path = parsed.path
     if parsed.scheme:
         if parsed.scheme.lower() != "https":
