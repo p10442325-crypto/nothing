@@ -386,7 +386,7 @@ def _curl_transfer(
                 "-f",
                 "-L",
                 "--http1.1",
-                "--connect-timeout", "30",
+                "--connect-timeout", "15",
                 "--speed-limit", "1024",
                 "--speed-time", "120",
                 "-H", f"User-Agent: {APP_USER_AGENT}",
@@ -415,7 +415,7 @@ def _curl_transfer(
             except (OSError, subprocess.SubprocessError) as exc:
                 last_error = str(exc)
                 if attempt + 1 < max(1, attempts):
-                    time.sleep(3)
+                    time.sleep(min(1.5, 0.5 * (attempt + 1)))
                     continue
                 break
 
