@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QImage, QTextDocument
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QTextBrowser
 
 from .models import Attachment, Post
@@ -113,7 +113,7 @@ class _HTMLSanitizer(HTMLParser):
             if title:
                 safe_attrs.append(f'title="{html.escape(title, quote=True)}"')
         elif tag == "img":
-            source = pawchive_image_url(values.get("src") or "", values.get("alt") or "")
+            source = pawchive_image_url(values.get("src") or "")
             if not source:
                 return
             safe_attrs.append(f'src="{html.escape(source, quote=True)}"')
@@ -159,7 +159,7 @@ def _markdown_inline(value: str) -> str:
 
     def image(match: re.Match[str]) -> str:
         alt, source = match.group(1), match.group(2).strip()
-        url = pawchive_image_url(source, alt)
+        url = pawchive_image_url(source)
         if not url:
             return html.escape(alt or source)
         return f'<img src="{html.escape(url, quote=True)}" alt="{html.escape(alt, quote=True)}" style="max-width:100%;height:auto;">'
@@ -328,7 +328,7 @@ class PostTextBrowser(QTextBrowser):
     def _image_loaded(self, key: str, reply, url: QUrl) -> None:
         self._pending.pop(key, None)
         try:
-            if reply.error() == reply.NetworkError.NoError:
+            if reply.error() == QNetworkReply.NetworkError.NoError:
                 image = QImage.fromData(bytes(reply.readAll()))
                 if not image.isNull():
                     self._image_cache[key] = image
