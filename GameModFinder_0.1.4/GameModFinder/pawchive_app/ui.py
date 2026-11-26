@@ -107,6 +107,7 @@ class PostBrowser(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         split = QSplitter(Qt.Horizontal)
         self.items = QListWidget()
+        self.items.setIconSize(QSize(72, 72))
         self.items.currentRowChanged.connect(self._show_selected)
         split.addWidget(self.items)
 
@@ -157,6 +158,7 @@ class PostBrowser(QWidget):
         self.current_post: Post | None = None
 
     def set_posts(self, posts: list[Post]) -> None:
+        self._current_thumbnail_url = ""
         self.posts = posts
         self.items.clear()
         self.current_post = None
