@@ -72,7 +72,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(creators[0].creator_id, "1")
         request = mock_urlopen.call_args.args[0]
         self.assertIn("/creators", request.full_url)
-        self.assertIn("GameModFinder-Pawchive", request.get_header("User-agent"))
+        self.assertIn("PawchiveModFinder", request.get_header("User-agent"))
 
     @patch("pawchive_app.api.urlopen")
     def test_creator_post_route_and_offset(self, mock_urlopen):
