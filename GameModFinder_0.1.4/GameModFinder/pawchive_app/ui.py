@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QPlainTextEdit, QTextBrowser, QProgressBar, QSpinBox, QSplitter, QTabWidget,
-    QVBoxLayout, QWidget, QInputDialog,
+    QVBoxLayout, QWidget, QInputDialog, QStackedWidget,
 )
 
 from .api import PawchiveClient, PawchiveError
@@ -45,6 +45,8 @@ QPushButton#Primary:hover { background:#4b89db; }
 QListWidget { border:0; background:transparent; padding:2px; }
 QListWidget::item { background:#182230; border:1px solid #2b3b50; border-radius:8px; padding:10px; margin:3px 1px; }
 QListWidget::item:selected { background:#213a56; border-color:#6596cd; }
+QListWidget#PostList::item { padding:14px 16px; min-height:28px; font-size:11pt; }
+QTextBrowser#PostContent { background:#101822; border:1px solid #334258; border-radius:10px; padding:14px; font-size:11pt; }
 QTabWidget::pane { border:1px solid #2a394c; border-radius:10px; background:#151d28; }
 QTabBar::tab { background:#161e29; padding:10px 16px; margin-right:3px; border-top-left-radius:7px; border-top-right-radius:7px; }
 QTabBar::tab:selected { background:#2a405b; color:white; }
@@ -104,55 +106,92 @@ class PostBrowser(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        split = QSplitter(Qt.Horizontal)
-        self.items = QListWidget()
-        self.items.setIconSize(QSize(72, 72))
-        self.items.currentRowChanged.connect(self._show_selected)
-        split.addWidget(self.items)
 
-        detail = QFrame()
-        detail.setObjectName("Panel")
-        right = QVBoxLayout(detail)
+        # Post list and post detail are separate full-width screens.
+        self.stack = QStackedWidget(self)
+        layout.addWidget(self.stack, 1)
+
+        self.list_page = QWidget()
+        list_layout = QVBoxLayout(self.list_page)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_header = QHBoxLayout()
+        list_heading = QLabel("게시물 목록")
+        list_heading.setObjectName("Section")
+        self.list_count = QLabel("0개")
+        self.list_count.setObjectName("Subtle")
+        list_header.addWidget(list_heading)
+        list_header.addStretch()
+        list_header.addWidget(self.list_count)
+        list_layout.addLayout(list_header)
+
+        self.items = QListWidget()
+        self.items.setObjectName("PostList")
+        self.items.setIconSize(QSize(32, 32))
+        self.items.setSpacing(5)
+        self.items.itemClicked.connect(self._open_item)
+        list_layout.addWidget(self.items, 1)
+        self.list_empty = QLabel("표시할 게시물이 없습니다.")
+        self.list_empty.setObjectName("Subtle")
+        self.list_empty.setAlignment(Qt.AlignCenter)
+        list_layout.addWidget(self.list_empty)
+        self.stack.addWidget(self.list_page)
+
+        self.detail_page = QWidget()
+        detail_layout = QVBoxLayout(self.detail_page)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(10)
+
+        navigation = QHBoxLayout()
+        self.back_button = QPushButton("← 게시물 목록으로")
+        self.back_button.clicked.connect(self._back_to_list)
+        navigation.addWidget(self.back_button)
+        navigation.addStretch()
+        self.open_button = QPushButton("Pawchive 원본 열기")
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self._open_post)
+        navigation.addWidget(self.open_button)
+        detail_layout.addLayout(navigation)
+
         self.title = QLabel("게시물을 선택하세요")
-        self.title.setObjectName("Section")
+        self.title.setObjectName("Hero")
         self.title.setWordWrap(True)
         self.meta = QLabel("")
         self.meta.setObjectName("Subtle")
         self.meta.setWordWrap(True)
+
         self.content = QTextBrowser()
+        self.content.setObjectName("PostContent")
         self.content.setOpenExternalLinks(False)
         self.content.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
-        self.image_preview = QLabel("이미지 미리보기")
+        detail_layout.addWidget(self.title)
+        detail_layout.addWidget(self.meta)
+        detail_layout.addWidget(self.content, 1)
+
+        # Keep the legacy preview object available for compatibility; the detail
+        # page now renders post images inline at their natural reading width.
+        self.image_preview = QLabel("이미지 미리보기", self.detail_page)
         self.image_preview.setObjectName("PostPreview")
         self.image_preview.setAlignment(Qt.AlignCenter)
-        self.image_preview.setMinimumHeight(130)
-        self.image_preview.setMaximumHeight(210)
+        self.image_preview.hide()
         self._current_thumbnail_url = ""
         self._thumbnail_workers: set[TaskThread] = set()
         self.session_cookie = ""
+
+        file_row = QHBoxLayout()
+        file_label = QLabel("첨부 파일")
         self.files = QComboBox()
+        self.files.setMinimumWidth(220)
         self.download_button = QPushButton("선택한 파일 다운로드")
         self.download_button.setObjectName("Primary")
         self.download_button.setEnabled(False)
-        self.open_button = QPushButton("Pawchive 원본 열기")
-        self.open_button.setEnabled(False)
         self.download_button.clicked.connect(self._download)
-        self.open_button.clicked.connect(self._open_post)
-        right.addWidget(self.title)
-        right.addWidget(self.meta)
-        right.addWidget(QLabel("본문"))
-        right.addWidget(self.content, 2)
-        right.addWidget(QLabel("이미지 미리보기"))
-        right.addWidget(self.image_preview)
-        right.addWidget(QLabel("첨부 파일"))
-        right.addWidget(self.files)
-        row = QHBoxLayout()
-        row.addWidget(self.download_button)
-        row.addWidget(self.open_button)
-        right.addLayout(row)
-        split.addWidget(detail)
-        split.setSizes([360, 640])
-        layout.addWidget(split, 1)
+        file_row.addWidget(file_label)
+        file_row.addWidget(self.files, 1)
+        file_row.addWidget(self.download_button)
+        detail_layout.addLayout(file_row)
+
+        self.stack.addWidget(self.detail_page)
+        self.stack.setCurrentWidget(self.list_page)
         self.posts: list[Post] = []
         self.current_post: Post | None = None
 
@@ -163,26 +202,31 @@ class PostBrowser(QWidget):
             setter(self.session_cookie)
 
     def set_posts(self, posts: list[Post]) -> None:
-        self._current_thumbnail_url = ""
         self.posts = posts
         self.items.clear()
         self.current_post = None
+        self.stack.setCurrentWidget(self.list_page)
         for post in posts:
-            date = post.published or post.added or "날짜 정보 없음"
-            item = QListWidgetItem(f"{post.title}\n{post.service} · {post.creator_id} · {date}")
+            item = QListWidgetItem(post.title or "(제목 없음)")
             item.setData(Qt.UserRole, post)
+            item.setToolTip(
+                f"{post.service} · 크리에이터 {post.creator_id} · "
+                f"{post.published or '게시일 정보 없음'}"
+            )
             self.items.addItem(item)
-        if posts:
-            self.items.setCurrentRow(0)
-        else:
-            self.title.setText("표시할 게시물이 없습니다")
-            self.meta.setText("")
-            self.content.clear()
-            self.image_preview.setText("이미지 미리보기")
-            self.image_preview.setPixmap(QPixmap())
-            self.files.clear()
-            self.download_button.setEnabled(False)
-            self.open_button.setEnabled(False)
+        self.list_count.setText(f"{len(posts)}개")
+        self.items.setVisible(bool(posts))
+        self.list_empty.setVisible(not posts)
+        self.title.setText("게시물을 선택하세요")
+        self.meta.clear()
+        self.content.clear()
+        self.files.clear()
+        self.download_button.setEnabled(False)
+        self.open_button.setEnabled(False)
+
+    def _open_item(self, item: QListWidgetItem) -> None:
+        row = self.items.row(item)
+        self._show_selected(row)
 
     def _show_selected(self, row: int) -> None:
         if row < 0 or row >= len(self.posts):
@@ -190,14 +234,21 @@ class PostBrowser(QWidget):
         post = self.posts[row]
         self.current_post = post
         self.title.setText(post.title)
-        self.meta.setText(f"{post.service} · 크리에이터 {post.creator_id} · 게시물 {post.post_id}\n게시일: {post.published or '정보 없음'}")
+        self.meta.setText(
+            f"{post.service} · 크리에이터 {post.creator_id} · 게시물 {post.post_id}\n"
+            f"게시일: {post.published or '정보 없음'}"
+        )
         self.content.setMarkdown(post.content or "(본문 없음)")
-        self._load_thumbnail(post)
         self.files.clear()
         for file in post.files:
             self.files.addItem(file.name or file.path, file)
         self.download_button.setEnabled(bool(post.files))
         self.open_button.setEnabled(True)
+        self.stack.setCurrentWidget(self.detail_page)
+
+    def _back_to_list(self) -> None:
+        self.stack.setCurrentWidget(self.list_page)
+        self.items.setFocus()
 
     def _load_thumbnail(self, post: Post) -> None:
         self._current_thumbnail_url = ""
@@ -229,7 +280,6 @@ class PostBrowser(QWidget):
             if isinstance(value, str) and value.strip():
                 candidates.append((value.strip(), None))
 
-        # Images embedded directly in HTML/Markdown post content.
         for match in re.findall(r"""<img[^>]+src=["']([^"']+)""", post.content or "", flags=re.I):
             candidates.append((match, Path(match.split("?", 1)[0]).name or None))
         for match in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", post.content or ""):
@@ -286,7 +336,7 @@ class PostBrowser(QWidget):
         ))
         selected = self.items.currentItem()
         if selected:
-            selected.setIcon(QIcon(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            selected.setIcon(QIcon(pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
 
     def _download(self) -> None:
         if self.current_post and self.files.currentData():
@@ -295,7 +345,6 @@ class PostBrowser(QWidget):
     def _open_post(self) -> None:
         if self.current_post:
             QDesktopServices.openUrl(QUrl(self.current_post.post_url))
-
 
 class SettingsPage(QWidget):
     changed = Signal()
