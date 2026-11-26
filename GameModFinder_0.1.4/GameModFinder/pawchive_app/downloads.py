@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import stat
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -172,6 +173,177 @@ def _curl_headers(header_path: Path) -> tuple[int | None, int | None]:
     return status, int(lengths[-1]) if lengths else None
 
 
+def _find_curl() -> str | None:
+    """Prefer Windows' inbox curl over third-party PATH copies."""
+    if os.name == "nt":
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        system_curl = system_root / "System32" / "curl.exe"
+        if system_curl.is_file():
+            return str(system_curl)
+    return shutil.which("curl.exe") or shutil.which("curl")
+
+
+def _browser_transfer(
+    url: str,
+    destination: str | Path,
+    timeout: int,
+    session_cookie: str | None = None,
+) -> Path:
+    """Last-resort Chromium transport, retaining the app's identifiable User-Agent.
+
+    This is not browser impersonation: the request identifies this application
+    and its project contact, while Chromium is used only as an alternate TLS
+    and network stack. HTTP/2 and QUIC are disabled to keep transport parity
+    with Pawchive's documented HTTP/1.1 download path.
+    """
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        host == "pawchive.pw" or host.endswith(".pawchive.pw")
+    ):
+        raise DownloadError("브라우저 재시도 주소가 Pawchive HTTPS 서버가 아닙니다.")
+
+    try:
+        from playwright.sync_api import (
+            Error as PlaywrightError,
+            TimeoutError as PlaywrightTimeoutError,
+            sync_playwright,
+        )
+    except ImportError as exc:
+        raise DownloadError("Playwright가 없습니다. 앱 폴더에서 run.bat을 다시 실행해 주세요.") from exc
+
+    if session_cookie and any(ch in session_cookie for ch in "\r\n;"):
+        raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
+
+    errors: list[str] = []
+    target = Path(destination)
+    with sync_playwright() as playwright:
+        for channel in ("chrome", "msedge"):
+            browser = None
+            context = None
+            try:
+                browser = playwright.chromium.launch(
+                    channel=channel,
+                    headless=True,
+                    args=[
+                        "--disable-http2",
+                        "--disable-quic",
+                        "--disable-features=UseDnsHttpsSvcbAlpn",
+                    ],
+                )
+                context = browser.new_context(
+                    accept_downloads=True,
+                    locale="ko-KR",
+                    user_agent=APP_USER_AGENT,
+                    extra_http_headers={"Accept": "*/*"},
+                    ignore_https_errors=False,
+                )
+                if session_cookie:
+                    context.add_cookies([{
+                        "name": "session",
+                        "value": session_cookie,
+                        "domain": host,
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    }])
+
+                def allow_pawchive(route):
+                    request_host = (urlsplit(route.request.url).hostname or "").lower()
+                    if request_host == "pawchive.pw" or request_host.endswith(".pawchive.pw"):
+                        route.continue_()
+                    else:
+                        route.abort()
+
+                context.route("**/*", allow_pawchive)
+                page = context.new_page()
+                downloads = []
+                page.on("download", lambda item: downloads.append(item))
+                response = None
+                navigation_error = ""
+                try:
+                    response = page.goto(
+                        url,
+                        wait_until="commit",
+                        timeout=max(10, int(timeout)) * 1000,
+                    )
+                except PlaywrightError as exc:
+                    # Attachment responses can abort navigation while raising a download event.
+                    navigation_error = str(exc)
+
+                if not downloads:
+                    try:
+                        page.wait_for_timeout(700)
+                    except PlaywrightError:
+                        pass
+
+                if downloads:
+                    downloads[0].save_as(str(target))
+                    if target.exists() and target.stat().st_size > 0:
+                        size = target.stat().st_size
+                        if size == 376:
+                            target.unlink(missing_ok=True)
+                            raise DownloadError(
+                                "Pawchive가 자동 요청을 차단했습니다(376바이트 반응)."
+                            )
+                        return target
+
+                if response is not None:
+                    if response.status == 404:
+                        raise DownloadError("Pawchive 파일을 찾지 못했습니다(404).")
+                    if response.status == 403:
+                        raise DownloadError("Pawchive 파일 서버가 요청을 거부했습니다(403).")
+                    if response.status == 429:
+                        raise DownloadError("Pawchive 요청 제한(429)에 도달했습니다.")
+                    if response.status >= 400:
+                        raise DownloadError(f"Chrome/Edge 파일 서버 오류: HTTP {response.status}")
+
+                    content_length = response.headers.get("content-length")
+                    if content_length and int(content_length) > 512 * 1024 * 1024:
+                        raise DownloadError(
+                            "브라우저가 다운로드 이벤트를 제공하지 않았고 파일이 512 MiB보다 큽니다."
+                        )
+                    body = response.body()
+                    if not body:
+                        raise DownloadError("Chrome/Edge에서 빈 파일 응답을 받았습니다.")
+                    if len(body) == 376:
+                        raise DownloadError(
+                            "Pawchive가 자동 요청을 차단했습니다(376바이트 반응)."
+                        )
+                    if content_length and len(body) != int(content_length):
+                        raise DownloadError(
+                            f"브라우저 응답 크기가 맞지 않습니다: {len(body)}B / {content_length}B"
+                        )
+                    target.write_bytes(body)
+                    return target
+
+                raise DownloadError(
+                    navigation_error or "Chrome/Edge에서 파일 응답을 받지 못했습니다."
+                )
+            except DownloadError:
+                raise
+            except PlaywrightTimeoutError as exc:
+                errors.append(f"{channel}: 시간 초과: {exc}")
+            except Exception as exc:
+                errors.append(f"{channel}: {exc}")
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+
+    raise DownloadError(
+        "Chrome/Edge 네트워크 전송도 실패했습니다. "
+        + (" | ".join(errors[-2:]) if errors else "사용 가능한 브라우저가 없습니다.")
+    )
+
+
 def _curl_transfer(
     url: str,
     destination: str | Path,
@@ -181,7 +353,7 @@ def _curl_transfer(
     resume: bool = True,
     attempts: int = 5,
 ) -> Path:
-    """Download from Pawchive with its documented identifiable UA and HTTP/1.1."""
+    """Transfer using app-identifiable curl/HTTP1.1, then an app-UA Chromium fallback."""
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not (
@@ -189,9 +361,12 @@ def _curl_transfer(
     ):
         raise DownloadError("다운로드 주소가 Pawchive HTTPS 서버가 아닙니다.")
 
-    curl = shutil.which("curl.exe") or shutil.which("curl")
+    curl = _find_curl()
     if not curl:
-        raise DownloadError("Windows 기본 curl.exe를 찾지 못했습니다.")
+        raise DownloadError("Windows curl.exe를 찾지 못했습니다.")
+
+    if session_cookie and any(ch in session_cookie for ch in "\r\n;"):
+        raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
 
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -214,9 +389,11 @@ def _curl_transfer(
                 "-H", "Accept: */*",
                 "-D", str(header_path),
             ]
+            # Broken IPv6 routes are common on Windows networks. Try IPv4 first,
+            # then let curl choose normally for networks that are IPv6-only.
+            if attempt < max(1, attempts // 2):
+                command.append("-4")
             if session_cookie:
-                if any(ch in session_cookie for ch in "\r\n;"):
-                    raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
                 command.extend(["-b", f"session={session_cookie}"])
             if offset:
                 command.extend(["-C", str(offset)])
@@ -268,17 +445,24 @@ def _curl_transfer(
                 )
             else:
                 last_error = detail or f"curl 종료 코드 {result.returncode}, HTTP {status or 'unknown'}"
-                # If the range request was ignored, restart cleanly instead of appending a full body.
                 if offset and status == 200:
                     target.unlink(missing_ok=True)
 
             if attempt + 1 < max(1, attempts):
                 time.sleep(3)
 
-        raise DownloadError(
-            f"Pawchive 다운로드 연결에 실패했습니다({last_error or '응답 없음'}). "
-            "브라우저 흉내 UA가 아닌 앱 식별 UA와 HTTP/1.1로 재시도했지만 연결이 끊겼습니다."
-        )
+        # Curl may be reset by the TLS/network path even when the public API is
+        # reachable. Retry with Chrome/Edge's alternate TLS stack while keeping
+        # the same application User-Agent and the one-request-per-second gate.
+        try:
+            _wait_download_slot()
+            _browser_transfer(url, target, timeout, session_cookie=session_cookie)
+            return target
+        except DownloadError as browser_error:
+            raise DownloadError(
+                "Pawchive 파일 서버가 앱 연결을 반복해서 끊었습니다. "
+                f"curl: {last_error or '연결 실패'} / Chrome·Edge: {browser_error}"
+            ) from browser_error
     finally:
         header_path.unlink(missing_ok=True)
 
