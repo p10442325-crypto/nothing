@@ -255,7 +255,8 @@ def _markdown_to_html(content: str) -> str:
 
 def render_post_html(content: str, attachments: tuple[Attachment, ...] | list[Attachment] = ()) -> str:
     raw = content or ""
-    if re.search(r"<\s*(?:p|div|br|img|strong|em|h[1-6]|ul|ol|li|blockquote|table)\b", raw, re.I):
+    tag_pattern = "|".join(sorted(ALLOWED_TAGS | BLOCKED_TAGS))
+    if re.search(r"<\s*/?\s*(?:" + tag_pattern + r")\b", raw, re.I):
         parser = _HTMLSanitizer()
         try:
             parser.feed(raw)
