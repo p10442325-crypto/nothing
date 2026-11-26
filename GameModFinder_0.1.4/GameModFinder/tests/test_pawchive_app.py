@@ -143,6 +143,22 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(calls, [(0, None), (50, None), (100, None)])
         self.assertEqual(len(posts), 117)
 
+    def test_all_creator_posts_preserves_tag_across_pages(self):
+        calls = []
+        def page(_service, _creator_id, offset=0, query=None, tag=None):
+            calls.append((offset, tag))
+            count = 50 if offset == 0 else 3
+            return [
+                Post(service="fanbox", creator_id="1234", post_id=str(offset + index))
+                for index in range(count)
+            ]
+
+        with patch.object(PawchiveClient, "creator_posts", side_effect=page):
+            posts = PawchiveClient().all_creator_posts("fanbox", "1234", tag="AI")
+
+        self.assertEqual(calls, [(0, "AI"), (50, "AI")])
+        self.assertEqual(len(posts), 53)
+
     def test_all_recent_posts_fetches_until_a_short_page(self):
         calls = []
         def page(query=None, offset=0):
@@ -308,6 +324,41 @@ class DownloadSafetyTests(unittest.TestCase):
                     results = list(pool.map(lambda _index: fetch_thumbnail_bytes(url), range(2)))
                 self.assertEqual(results, [b"shared-thumbnail", b"shared-thumbnail"])
                 transfer.assert_called_once()
+
+    @patch("pawchive_app.downloads._wait_download_slot")
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads._find_curl", return_value="curl.exe")
+    def test_thumbnail_transfer_skips_file_host_request_gate(
+        self, _mock_curl, mock_run, mock_request_gate
+    ):
+        def fake_run(command, **_kwargs):
+            header_path = Path(command[command.index("-D") + 1])
+            output_path = Path(command[command.index("-o") + 1])
+            header_path.write_text(
+                "HTTP/1.1 200 OK\\r\\nContent-Length: 6\\r\\n",
+                encoding="ascii",
+            )
+            output_path.write_bytes(b"abcdef")
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "thumbnail.bin"
+            from pawchive_app.downloads import _curl_transfer
+            _curl_transfer(
+                "https://img.pawchive.pw/thumbnail/data/ab/image.jpg?f=image.jpg",
+                target,
+                30,
+                resume=False,
+                attempts=1,
+            )
+            self.assertEqual(target.read_bytes(), b"abcdef")
+        mock_request_gate.assert_not_called()
 
     @patch("pawchive_app.downloads.subprocess.run")
     @patch("pawchive_app.downloads.shutil.which", return_value="curl.exe")
