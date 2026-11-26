@@ -11,7 +11,7 @@ from urllib.error import URLError
 from unittest.mock import patch
 
 from pawchive_app.api import PawchiveClient
-from pawchive_app.downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
+from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
 from pawchive_app.enhancements import pawchive_image_url
 from pawchive_app.models import Creator, Post, parse_creator_url
 from pawchive_app.repository import LocalRepository
@@ -239,6 +239,7 @@ class DownloadSafetyTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"abcdef")
         command = mock_run.call_args.args[0]
         self.assertIn("--http1.1", command)
+        self.assertIn("-4", command)
         self.assertTrue(any(str(item).startswith("User-Agent: PawchiveModFinder/") for item in command))
         self.assertIn("-f", command)
 
@@ -272,6 +273,37 @@ class DownloadSafetyTests(unittest.TestCase):
                     resume=False,
                 )
             self.assertFalse(target.exists())
+
+    @patch("pawchive_app.downloads._browser_transfer")
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads._find_curl", return_value="curl.exe")
+    def test_curl_connection_reset_falls_back_to_identified_browser_transport(
+        self, _mock_curl, mock_run, mock_browser
+    ):
+        class Result:
+            returncode = 35
+            stdout = ""
+            stderr = "curl: (35) Recv failure: Connection was reset"
+
+        mock_run.return_value = Result()
+
+        def save_test_payload(url, destination, timeout, session_cookie=None):
+            Path(destination).write_bytes(b"browser-payload")
+
+        mock_browser.side_effect = save_test_payload
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "fallback.bin"
+            _curl_transfer(
+                "https://file.pawchive.pw/data/ab/fallback.bin?f=fallback.bin",
+                target,
+                10,
+                resume=False,
+                attempts=1,
+            )
+            self.assertEqual(target.read_bytes(), b"browser-payload")
+        mock_browser.assert_called_once()
+        self.assertEqual(mock_browser.call_args.args[0],
+                         "https://file.pawchive.pw/data/ab/fallback.bin?f=fallback.bin")
 
     def test_zip_extracts_inside_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
