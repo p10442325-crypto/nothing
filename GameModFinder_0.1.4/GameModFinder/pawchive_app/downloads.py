@@ -403,7 +403,11 @@ def _curl_transfer(
                 command.extend(["-C", str(offset)])
             command.extend(["-o", str(target), url])
 
-            _wait_download_slot()
+            # Pawchive's one-request-per-second limit applies to the file
+            # host. Thumbnail requests use the separate img host and are
+            # already bounded by the UI's small worker pool.
+            if host == FILES_HOST:
+                _wait_download_slot()
             try:
                 result = subprocess.run(
                     command,
@@ -459,7 +463,8 @@ def _curl_transfer(
         # reachable. Retry with Chrome/Edge's alternate TLS stack while keeping
         # the same application User-Agent and the one-request-per-second gate.
         try:
-            _wait_download_slot()
+            if host == FILES_HOST:
+                _wait_download_slot()
             _browser_transfer(url, target, timeout, session_cookie=session_cookie)
             return target
         except DownloadError as browser_error:
