@@ -6,11 +6,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QThread, Signal
 from PySide6.QtGui import QImage, QTextDocument
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QTextBrowser
 
+from .downloads import fetch_thumbnail_bytes
 from .models import Attachment, Post
 
 
@@ -53,6 +53,21 @@ def pawchive_image_url(path_or_url: str, filename: str = "") -> str:
                 query.append(("f", filename))
             return urlunsplit(("https", "img.pawchive.pw", path, urlencode(query), ""))
         if host in {"pawchive.pw", "www.pawchive.pw"}:
+            path = _safe_segments(path)
+            if path.startswith("/data/"):
+                thumbnail_path = "/thumbnail" + path
+                if filename and not any(key == "f" for key, _ in query):
+                    query.append(("f", filename))
+                return urlunsplit((
+                    "https", "img.pawchive.pw",
+                    quote(thumbnail_path, safe="/:@!        if host == "img.pawchive.pw" and path.startswith("/thumbnail/"):
+            if filename and not any(key == "f" for key, _ in query):
+                query.append(("f", filename))
+            return urlunsplit(("https", "img.pawchive.pw", path, urlencode(query), ""))
+        if host in {"pawchive.pw", "www.pawchive.pw"}:
+            return value'()*+,;=-._~"),
+                    urlencode(query), "",
+                ))
             return value
     else:
         if parsed.netloc:
@@ -298,46 +313,81 @@ def render_post_html(content: str, attachments: tuple[Attachment, ...] | list[At
     )
 
 
+class _ThumbnailFetchThread(QThread):
+    loaded = Signal(str, bytes)
+    failed = Signal(str, str)
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self.url = url
+
+    def run(self) -> None:
+        try:
+            self.loaded.emit(self.url, fetch_thumbnail_bytes(self.url))
+        except Exception as exc:
+            self.failed.emit(self.url, str(exc))
+
+
 class PostTextBrowser(QTextBrowser):
-    """Read-only rich post viewer with asynchronous Pawchive image loading."""
+    """Read-only rich post viewer with browser-backed Pawchive image loading."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setReadOnly(True)
         self.setOpenExternalLinks(True)
         self.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
-        self.network = QNetworkAccessManager(self)
         self._image_cache: dict[str, QImage] = {}
-        self._pending: dict[str, object] = {}
+        self._pending: dict[str, _ThumbnailFetchThread] = {}
+        self._image_failures: set[str] = set()
+
+    def setHtml(self, text: str) -> None:
+        self._image_failures.clear()
+        super().setHtml(text)
 
     def loadResource(self, resource_type, name):
         if resource_type == QTextDocument.ResourceType.ImageResource:
             url = name if isinstance(name, QUrl) else QUrl(str(name))
             host = (url.host() or "").lower()
-            if url.scheme().lower() == "https" and host in IMAGE_HOSTS:
-                key = url.toString()
+            key = url.toString()
+            if (
+                url.scheme().lower() == "https"
+                and host == "img.pawchive.pw"
+                and url.path().startswith("/thumbnail/data/")
+            ):
                 cached = self._image_cache.get(key)
                 if cached is not None:
                     return cached
-                if key not in self._pending:
-                    reply = self.network.get(QNetworkRequest(url))
-                    self._pending[key] = reply
-                    reply.finished.connect(lambda k=key, r=reply, u=url: self._image_loaded(k, r, u))
+                if key not in self._pending and key not in self._image_failures:
+                    worker = _ThumbnailFetchThread(key)
+                    self._pending[key] = worker
+                    worker.loaded.connect(self._image_loaded)
+                    worker.failed.connect(self._image_failed)
+                    worker.finished.connect(
+                        lambda image_url=key, item=worker: self._worker_finished(image_url, item)
+                    )
+                    worker.finished.connect(worker.deleteLater)
+                    worker.start()
                 return QImage()
         return super().loadResource(resource_type, name)
 
-    def _image_loaded(self, key: str, reply, url: QUrl) -> None:
-        self._pending.pop(key, None)
-        try:
-            if reply.error() == QNetworkReply.NetworkError.NoError:
-                image = QImage.fromData(bytes(reply.readAll()))
-                if not image.isNull():
-                    self._image_cache[key] = image
-                    self.document().addResource(QTextDocument.ResourceType.ImageResource, url, image)
-                    self.document().markContentsDirty(0, self.document().characterCount())
-                    self.viewport().update()
-        finally:
-            reply.deleteLater()
+    def _worker_finished(self, key: str, worker: _ThumbnailFetchThread) -> None:
+        if self._pending.get(key) is worker:
+            self._pending.pop(key, None)
+
+    def _image_loaded(self, key: str, payload: bytes) -> None:
+        image = QImage.fromData(payload)
+        if image.isNull():
+            self._image_failures.add(key)
+            return
+        self._image_cache[key] = image
+        url = QUrl(key)
+        self.document().addResource(QTextDocument.ResourceType.ImageResource, url, image)
+        self.document().markContentsDirty(0, self.document().characterCount())
+        self.viewport().update()
+
+    def _image_failed(self, key: str, message: str) -> None:
+        self._image_failures.add(key)
+        self.setToolTip(message)
 
 
 def _enhanced_download_attachment(self, post: Post, attachment: Attachment) -> None:
