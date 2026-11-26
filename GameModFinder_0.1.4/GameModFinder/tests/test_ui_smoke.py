@@ -28,6 +28,8 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
         self.assertTrue(hasattr(window.following_browser, "image_preview"))
         self.assertTrue(hasattr(window.following_browser, "_thumbnail_workers"))
+        self.assertTrue(hasattr(window, "creator_tag_combo"))
+        self.assertEqual(window.creator_tag_combo.itemText(0), "전체 게시물")
         self.assertIsNone(window.findChild(ui.QFrame, "Header"))
         window.close()
 
@@ -71,6 +73,10 @@ class DesktopSmokeTests(unittest.TestCase):
             browser.items.gridSize().width(),
         )
         self.assertTrue(browser.search_input.isEnabled())
+        browser.resize(1200, 760)
+        browser.show()
+        self.app.processEvents()
+        search_geometry = browser.search_input.geometry()
 
         browser.search_input.setText("sample-mod.zip")
         self.assertFalse(browser.items.item(0).isHidden())
@@ -78,7 +84,11 @@ class DesktopSmokeTests(unittest.TestCase):
         browser.search_input.setText("not-a-real-post")
         self.assertTrue(browser.items.item(0).isHidden())
         self.assertEqual(browser.list_empty.text(), "검색 결과가 없습니다.")
+        self.assertEqual(browser.list_content.currentWidget(), browser.list_empty)
+        self.app.processEvents()
+        self.assertEqual(browser.search_input.geometry(), search_geometry)
         browser.search_input.clear()
+        self.assertEqual(browser.list_content.currentWidget(), browser.items)
         self.assertFalse(browser.items.item(0).isHidden())
 
         browser.items.itemClicked.emit(browser.items.item(0))
