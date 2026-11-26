@@ -143,9 +143,13 @@ class PostBrowser(QWidget):
         self.items.setBatchSize(48)
         self.items.setWordWrap(True)
         self.items.setUniformItemSizes(True)
+        self.items.setVerticalScrollMode(QListView.ScrollPerPixel)
+        self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.items.setIconSize(QSize(176, 126))
         self.items.setGridSize(QSize(216, 204))
-        self.items.setSpacing(8)
+        self.items.setSpacing(3)
+        self.items.verticalScrollBar().setSingleStep(24)
+        self.items.verticalScrollBar().setPageStep(160)
         self.items.itemClicked.connect(self._open_item)
         self.items.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumbnails)
         list_layout.addWidget(self.items, 1)
@@ -175,11 +179,11 @@ class PostBrowser(QWidget):
         self.title = QLabel("게시물을 선택하세요")
         self.title.setObjectName("Hero")
         self.title.setWordWrap(True)
+        self.title.hide()
         self.meta = QLabel("")
         self.meta.setObjectName("Subtle")
         self.meta.setWordWrap(True)
-        detail_layout.addWidget(self.title)
-        detail_layout.addWidget(self.meta)
+        self.meta.hide()
 
         # Each attachment has its own download action; no dropdown selection.
         self.attachments_heading = QLabel("첨부 파일")
@@ -187,7 +191,7 @@ class PostBrowser(QWidget):
         detail_layout.addWidget(self.attachments_heading)
         self.attachments_area = QScrollArea()
         self.attachments_area.setWidgetResizable(True)
-        self.attachments_area.setMaximumHeight(154)
+        self.attachments_area.setMaximumHeight(104)
         self.attachments_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.attachments_host = QWidget()
         self.attachments_grid = QGridLayout(self.attachments_host)
@@ -225,6 +229,8 @@ class PostBrowser(QWidget):
         self._thumbnail_debounce.setInterval(100)
         self._thumbnail_debounce.timeout.connect(self._queue_visible_thumbnails)
         self.stack.addWidget(self.detail_page)
+        self._card_icon_width = 176
+        self._card_icon_height = 126
         self.stack.setCurrentWidget(self.list_page)
 
     @classmethod
@@ -293,6 +299,10 @@ class PostBrowser(QWidget):
         self._thumbnail_failed_urls.clear()
         self._thumbnail_items.clear()
 
+        posts = [
+            post for post in posts
+            if any(self._is_archive(attachment.name or attachment.path) for attachment in post.files)
+        ]
         self.posts = posts
         self.items.clear()
         self.current_post = None
@@ -306,7 +316,6 @@ class PostBrowser(QWidget):
                 f"{post.service} · 크리에이터 {post.creator_id} · "
                 f"{post.published or '게시일 정보 없음'}"
             )
-            item.setSizeHint(QSize(216, 204))
             thumb_url = self._thumbnail_url_for_post(post)
             item.setData(Qt.UserRole + 1, thumb_url)
             if thumb_url:
@@ -321,7 +330,13 @@ class PostBrowser(QWidget):
         self.content.clear()
         self._clear_attachment_cards()
         self.open_button.setEnabled(False)
-        QTimer.singleShot(0, lambda expected=generation: self._queue_visible_thumbnails(expected))
+        QTimer.singleShot(0, lambda expected=generation: self._refresh_card_layout(expected))
+
+    def _refresh_card_layout(self, generation: int) -> None:
+        if generation != self._thumbnail_generation:
+            return
+        self._update_card_grid()
+        self._queue_visible_thumbnails(generation)
 
     def _schedule_visible_thumbnails(self, *_args) -> None:
         self._thumbnail_debounce.start()
@@ -329,7 +344,25 @@ class PostBrowser(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if hasattr(self, "_thumbnail_debounce"):
+            self._update_card_grid()
             self._thumbnail_debounce.start()
+
+    def _update_card_grid(self) -> None:
+        if not hasattr(self, "items"):
+            return
+        available = max(1, self.items.viewport().width())
+        target_cell_width = 250
+        columns = max(1, min(7, available // target_cell_width))
+        cell_width = max(1, available // columns)
+        icon_width = max(120, min(250, cell_width - 20))
+        icon_height = max(86, int(icon_width * 0.70))
+        cell_height = icon_height + 78
+        self._card_icon_width = icon_width
+        self._card_icon_height = icon_height
+        self.items.setGridSize(QSize(cell_width, cell_height))
+        self.items.setIconSize(QSize(icon_width, icon_height))
+        for index in range(self.items.count()):
+            self.items.item(index).setSizeHint(QSize(cell_width - 8, cell_height - 8))
 
     def _queue_visible_thumbnails(self, expected_generation: int | None = None) -> None:
         generation = self._thumbnail_generation if expected_generation is None else expected_generation
@@ -449,11 +482,15 @@ class PostBrowser(QWidget):
 
     def _populate_attachment_cards(self, post: Post) -> None:
         self._clear_attachment_cards()
-        if not post.files:
+        archive_files = [
+            attachment for attachment in post.files
+            if self._is_archive(attachment.name or attachment.path)
+        ]
+        if not archive_files:
             return
         self.attachments_heading.setVisible(True)
         self.attachments_area.setVisible(True)
-        for index, attachment in enumerate(post.files):
+        for index, attachment in enumerate(archive_files):
             card = QFrame()
             card.setObjectName("AttachmentCard")
             row = QHBoxLayout(card)
@@ -600,25 +637,23 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(20, 18, 20, 16)
-        header = QFrame(); header.setObjectName("Header")
-        header_row = QHBoxLayout(header)
-        titles = QVBoxLayout()
-        title = QLabel("PAWCHIVE MOD FINDER"); title.setObjectName("Hero")
-        subtitle = QLabel("좋아하는 크리에이터를 팔로우하고 새 게시물과 파일을 한곳에서 확인하세요.")
-        subtitle.setObjectName("Subtle")
-        titles.addWidget(title); titles.addWidget(subtitle)
-        header_row.addLayout(titles); header_row.addStretch()
-        self.sync_label = QLabel("자동 동기화 60분")
-        self.sync_label.setObjectName("Subtle")
-        header_row.addWidget(self.sync_label)
-        self.status = QLabel("준비됨")
-        self.status.setObjectName("Subtle")
-        header_row.addWidget(self.status)
-        root.addWidget(header)
+        root.setContentsMargins(10, 8, 10, 8)
 
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
+
+        # Keep operational status compact without the large product banner.
+        self.sync_label = QLabel("자동 동기화 60분")
+        self.sync_label.setObjectName("Subtle")
+        self.status = QLabel("준비됨")
+        self.status.setObjectName("Subtle")
+        status_corner = QWidget()
+        status_row = QHBoxLayout(status_corner)
+        status_row.setContentsMargins(0, 0, 8, 0)
+        status_row.setSpacing(12)
+        status_row.addWidget(self.sync_label)
+        status_row.addWidget(self.status)
+        self.tabs.setCornerWidget(status_corner, Qt.TopRightCorner)
 
         # Following feed
         following_page = QWidget(); following_layout = QVBoxLayout(following_page)
