@@ -129,6 +129,7 @@ class PostBrowser(QWidget):
         self.image_preview.setMaximumHeight(210)
         self._current_thumbnail_url = ""
         self._thumbnail_workers: set[TaskThread] = set()
+        self.session_cookie = ""
         self.files = QComboBox()
         self.download_button = QPushButton("선택한 파일 다운로드")
         self.download_button.setObjectName("Primary")
@@ -154,6 +155,12 @@ class PostBrowser(QWidget):
         layout.addWidget(split, 1)
         self.posts: list[Post] = []
         self.current_post: Post | None = None
+
+    def set_session_cookie(self, value: str | None) -> None:
+        self.session_cookie = value or ""
+        setter = getattr(self.content, "set_session_cookie", None)
+        if callable(setter):
+            setter(self.session_cookie)
 
     def set_posts(self, posts: list[Post]) -> None:
         self._current_thumbnail_url = ""
@@ -241,7 +248,7 @@ class PostBrowser(QWidget):
             except DownloadError:
                 continue
             self._current_thumbnail_url = thumb_url
-            worker = TaskThread(lambda url=thumb_url: fetch_thumbnail_bytes(url))
+            worker = TaskThread(lambda url=thumb_url, cookie=self.session_cookie or None: fetch_thumbnail_bytes(url, session_cookie=cookie))
             self._thumbnail_workers.add(worker)
             worker.succeeded.connect(
                 lambda payload, expected=thumb_url: self._thumbnail_loaded(payload, expected)
@@ -391,6 +398,8 @@ class MainWindow(QMainWindow):
         self.workers: set[TaskThread] = set()
         self.preview_creator: Creator | None = None
         self._build_ui()
+        for browser in (self.following_browser, self.creator_browser, self.explore_browser):
+            browser.set_session_cookie(self.settings.get("session_key") or None)
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.refresh_following)
         self._reset_timer()
@@ -786,6 +795,8 @@ class MainWindow(QMainWindow):
 
     def _settings_changed(self) -> None:
         self.settings = self.settings_page.settings
+        for browser in (self.following_browser, self.creator_browser, self.explore_browser):
+            browser.set_session_cookie(self.settings.get("session_key") or None)
         self._reset_timer()
         self.status.setText("설정을 저장했습니다.")
 
