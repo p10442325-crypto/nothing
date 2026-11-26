@@ -9,6 +9,7 @@ import stat
 import tarfile
 import tempfile
 import zipfile
+from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
@@ -20,6 +21,10 @@ FILES_HOST = "file.pawchive.pw"
 _DOWNLOAD_LOCK = threading.Lock()
 _LAST_DOWNLOAD_AT = 0.0
 DOWNLOAD_INTERVAL_SECONDS = 1.0
+_THUMB_CACHE_LOCK = threading.Lock()
+_THUMB_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_THUMB_CACHE_SIZE = 0
+_THUMB_CACHE_LIMIT = 48 * 1024 * 1024
 
 
 def _wait_download_slot() -> None:
@@ -180,7 +185,7 @@ def _browser_download(
                     ignore_https_errors=False,
                 )
                 if session_cookie:
-                    if any(ch in session_cookie for ch in "\\r\\n;"):
+                    if any(ch in session_cookie for ch in "\r\n;"):
                         raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
                     context.add_cookies([{
                         "name": "session",
@@ -261,7 +266,8 @@ def _browser_download(
 
 
 def fetch_thumbnail_bytes(url: str, timeout: int = 30) -> bytes:
-    """Fetch a Pawchive thumbnail through the browser transport in a worker thread."""
+    """Fetch and cache a Pawchive thumbnail through the browser transport."""
+    global _THUMB_CACHE_SIZE
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https"
@@ -269,14 +275,30 @@ def fetch_thumbnail_bytes(url: str, timeout: int = 30) -> bytes:
         or not parsed.path.startswith("/thumbnail/data/")
     ):
         raise DownloadError("허용되지 않은 Pawchive 썸네일 주소입니다.")
-    with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
-        temporary = Path(directory) / "thumbnail.bin"
-        _wait_download_slot()
-        _browser_download(url, temporary, timeout)
-        payload = temporary.read_bytes()
-    if not payload or len(payload) > 16 * 1024 * 1024:
-        raise DownloadError("이미지 응답이 비어 있거나 너무 큽니다.")
-    return payload
+
+    # Serialize thumbnail fetches as well as caching them. This avoids duplicate
+    # requests when both the post body and preview panel display the same image.
+    with _THUMB_CACHE_LOCK:
+        cached = _THUMB_CACHE.get(url)
+        if cached is not None:
+            _THUMB_CACHE.move_to_end(url)
+            return cached
+
+        with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
+            temporary = Path(directory) / "thumbnail.bin"
+            _wait_download_slot()
+            _browser_download(url, temporary, timeout)
+            payload = temporary.read_bytes()
+
+        if not payload or len(payload) > 16 * 1024 * 1024:
+            raise DownloadError("이미지 응답이 비어 있거나 너무 큽니다.")
+
+        _THUMB_CACHE[url] = payload
+        _THUMB_CACHE_SIZE += len(payload)
+        while _THUMB_CACHE_SIZE > _THUMB_CACHE_LIMIT and _THUMB_CACHE:
+            _, removed = _THUMB_CACHE.popitem(last=False)
+            _THUMB_CACHE_SIZE -= len(removed)
+        return payload
 
 
 def download_file(
