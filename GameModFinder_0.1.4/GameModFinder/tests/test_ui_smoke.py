@@ -44,7 +44,7 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
         self.assertEqual(browser.items.item(0).text(), "제목만 보이는 게시물")
 
-        browser.items.item(0).click()
+        browser.items.itemClicked.emit(browser.items.item(0))
         self.assertEqual(browser.stack.currentWidget(), browser.detail_page)
         self.assertEqual(browser.title.text(), "제목만 보이는 게시물")
 
