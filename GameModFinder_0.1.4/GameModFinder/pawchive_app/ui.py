@@ -235,6 +235,10 @@ class PostBrowser(QWidget):
         self._thumbnail_debounce.setSingleShot(True)
         self._thumbnail_debounce.setInterval(100)
         self._thumbnail_debounce.timeout.connect(self._queue_visible_thumbnails)
+        self._pending_layout_generation = 0
+        self._layout_refresh_timer = QTimer(self)
+        self._layout_refresh_timer.setSingleShot(True)
+        self._layout_refresh_timer.timeout.connect(self._refresh_pending_card_layout)
         self.stack.addWidget(self.detail_page)
         self._card_icon_width = 176
         self._card_icon_height = 126
@@ -339,7 +343,8 @@ class PostBrowser(QWidget):
         self.content.clear()
         self._clear_attachment_cards()
         self.open_button.setEnabled(False)
-        QTimer.singleShot(0, lambda expected=generation: self._refresh_card_layout(expected))
+        self._pending_layout_generation = generation
+        self._layout_refresh_timer.start(0)
 
     def filter_posts(self, query: str = "") -> None:
         """Filter the loaded archive-post list without discarding cached posts."""
@@ -374,6 +379,9 @@ class PostBrowser(QWidget):
         else:
             self.list_content.setCurrentWidget(self.items)
         self._thumbnail_debounce.start()
+
+    def _refresh_pending_card_layout(self) -> None:
+        self._refresh_card_layout(self._pending_layout_generation)
 
     def _refresh_card_layout(self, generation: int) -> None:
         if generation != self._thumbnail_generation:
