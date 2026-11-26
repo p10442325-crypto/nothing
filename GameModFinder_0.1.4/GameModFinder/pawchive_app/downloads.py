@@ -61,6 +61,12 @@ def resolve_file_url(path_or_url: str, filename: str | None = None) -> str:
     elif normalized.startswith("/data"):
         raise DownloadError("Pawchive 파일 경로 형식이 올바르지 않습니다.")
     else:
+        # Pawchive's API returns a path relative to /data. Reject obvious
+        # non-file routes rather than treating arbitrary website URLs as files.
+        parts = [part for part in normalized.split("/") if part]
+        reserved = {"profile", "user", "creator", "creators", "post", "posts", "api", "thumbnail"}
+        if len(parts) < 2 or parts[0].casefold() in reserved:
+            raise DownloadError("허용되지 않은 Pawchive 파일 경로입니다.")
         normalized = "/data" + normalized
 
     if filename and not any(key == "f" for key, _ in query):
