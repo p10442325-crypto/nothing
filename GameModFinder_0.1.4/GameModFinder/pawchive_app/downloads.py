@@ -229,7 +229,7 @@ def _curl_transfer(
                     command,
                     capture_output=True,
                     text=True,
-                    timeout=max(int(timeout), 130),
+                    timeout=None,
                     check=False,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
