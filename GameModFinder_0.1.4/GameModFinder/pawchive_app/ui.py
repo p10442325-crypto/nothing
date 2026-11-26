@@ -108,7 +108,7 @@ class PostBrowser(QWidget):
         ".tgz", ".tbz2", ".txz", ".tar.gz", ".tar.bz2", ".tar.xz",
     }
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"}
-    MAX_THUMBNAIL_WORKERS = 3
+    MAX_THUMBNAIL_WORKERS = 4
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -158,8 +158,6 @@ class PostBrowser(QWidget):
         self.items.verticalScrollBar().setPageStep(160)
         self.items.itemClicked.connect(self._open_item)
         self.items.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumbnails)
-        list_layout.addWidget(self.items, 1)
-
         self.list_empty = QLabel("압축파일이 첨부된 게시물이 없습니다.")
         self.list_empty.setObjectName("Subtle")
         self.list_empty.setAlignment(Qt.AlignCenter)
