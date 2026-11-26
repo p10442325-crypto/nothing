@@ -224,6 +224,7 @@ class PostBrowser(QWidget):
         self._thumbnail_debounce.setSingleShot(True)
         self._thumbnail_debounce.setInterval(100)
         self._thumbnail_debounce.timeout.connect(self._queue_visible_thumbnails)
+        self.stack.addWidget(self.detail_page)
         self.stack.setCurrentWidget(self.list_page)
 
     @classmethod
