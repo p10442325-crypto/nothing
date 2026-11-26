@@ -10,7 +10,6 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl, QSize
 from PySide6.QtGui import QDesktopServices, QPixmap, QIcon
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
@@ -19,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import APP_USER_AGENT, PawchiveClient, PawchiveError
-from .downloads import (DownloadError, download_file, resolve_file_url, resolve_thumbnail_url, safe_extract_archive)
+from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url
 from .repository import LocalRepository
 
@@ -128,9 +127,8 @@ class PostBrowser(QWidget):
         self.image_preview.setAlignment(Qt.AlignCenter)
         self.image_preview.setMinimumHeight(130)
         self.image_preview.setMaximumHeight(210)
-        self.network = QNetworkAccessManager(self)
-        self.network.finished.connect(self._thumbnail_loaded)
         self._current_thumbnail_url = ""
+        self._thumbnail_workers: set[TaskThread] = set()
         self.files = QComboBox()
         self.download_button = QPushButton("선택한 파일 다운로드")
         self.download_button.setObjectName("Primary")
@@ -198,70 +196,83 @@ class PostBrowser(QWidget):
         self._current_thumbnail_url = ""
         self.image_preview.setPixmap(QPixmap())
         self.image_preview.setText("이미지 미리보기 확인 중…")
-        candidates = []
+        candidates: list[tuple[str, str | None]] = []
+
         media_objects = [post.raw.get("file")]
         raw_attachments = post.raw.get("attachments")
         if isinstance(raw_attachments, list):
             media_objects.extend(raw_attachments)
         for media in media_objects:
             if isinstance(media, dict):
-                for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
+                media_name = media.get("name") or media.get("filename")
+                for key in ("thumbnail", "thumbnail_url", "preview", "preview_url", "path", "url"):
                     value = media.get(key)
                     if isinstance(value, str) and value.strip():
-                        candidates.append(value.strip())
+                        candidates.append((value.strip(), str(media_name) if media_name else None))
+
         for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
             value = post.raw.get(key)
             if isinstance(value, str) and value.strip():
-                candidates.append(value.strip())
-        # Prefer supported Pawchive image links embedded in the post body too.
+                candidates.append((value.strip(), None))
+
+        # Images embedded directly in HTML/Markdown post content.
         for match in re.findall(r"""<img[^>]+src=["']([^"']+)""", post.content or "", flags=re.I):
-            candidates.append(match)
+            candidates.append((match, Path(match.split("?", 1)[0]).name or None))
         for match in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", post.content or ""):
-            candidates.append(match.strip().strip("<>"))
+            source = match.strip().strip("<>")
+            candidates.append((source, Path(source.split("?", 1)[0]).name or None))
+
         for attachment in post.files:
             if Path(attachment.name).suffix.lower() in {
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"
             }:
-                candidates.append(attachment.path)
-        for candidate in candidates:
+                candidates.append((attachment.path, attachment.name))
+
+        for candidate, filename in candidates:
             try:
-                thumb_url = resolve_thumbnail_url(candidate)
+                thumb_url = resolve_thumbnail_url(candidate, filename=filename)
             except DownloadError:
                 continue
             self._current_thumbnail_url = thumb_url
-            request = QNetworkRequest(QUrl(thumb_url))
-            request.setRawHeader(b"User-Agent", APP_USER_AGENT.encode("utf-8"))
-            request.setRawHeader(b"Accept", b"image/avif,image/webp,image/png,image/jpeg,*/*;q=0.8")
-            self.network.get(request)
+            worker = TaskThread(lambda url=thumb_url: fetch_thumbnail_bytes(url))
+            self._thumbnail_workers.add(worker)
+            worker.succeeded.connect(
+                lambda payload, expected=thumb_url: self._thumbnail_loaded(payload, expected)
+            )
+            worker.failed.connect(
+                lambda message, expected=thumb_url: self._thumbnail_failed(message, expected)
+            )
+            worker.finished.connect(
+                lambda item=worker: self._thumbnail_workers.discard(item)
+            )
+            worker.start()
             return
+
         self.image_preview.setText("미리보기 가능한 이미지 첨부가 없습니다.")
 
-    def _thumbnail_loaded(self, reply) -> None:
-        try:
-            if reply.request().url().toString() != self._current_thumbnail_url:
-                return
-            if reply.error():
-                self.image_preview.setText("썸네일을 불러오지 못했습니다. 원본 게시물에서 확인해 주세요.")
-                return
-            payload = bytes(reply.readAll())
-            if not payload or len(payload) > 16 * 1024 * 1024:
-                self.image_preview.setText("이미지 크기가 너무 크거나 응답이 비어 있습니다.")
-                return
-            pixmap = QPixmap()
-            if not pixmap.loadFromData(payload):
-                self.image_preview.setText("Pawchive에서 이미지 형식을 확인할 수 없습니다.")
-                return
-            self.image_preview.setPixmap(pixmap.scaled(
-                max(180, self.image_preview.width() - 16),
-                max(100, self.image_preview.height() - 12),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            ))
-            selected = self.items.currentItem()
-            if selected:
-                selected.setIcon(QIcon(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
-        finally:
-            reply.deleteLater()
+    def _thumbnail_failed(self, message: str, expected_url: str) -> None:
+        if expected_url != self._current_thumbnail_url:
+            return
+        self.image_preview.setText("썸네일을 불러오지 못했습니다. 원본 게시물에서 확인해 주세요.")
+        self.image_preview.setToolTip(message)
+
+    def _thumbnail_loaded(self, payload: bytes, expected_url: str) -> None:
+        if expected_url != self._current_thumbnail_url:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(payload):
+            self.image_preview.setText("Pawchive 응답을 이미지로 해석할 수 없습니다.")
+            return
+        self.image_preview.setToolTip("")
+        self.image_preview.setPixmap(pixmap.scaled(
+            max(180, self.image_preview.width() - 16),
+            max(100, self.image_preview.height() - 12),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        ))
+        selected = self.items.currentItem()
+        if selected:
+            selected.setIcon(QIcon(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
 
     def _download(self) -> None:
         if self.current_post and self.files.currentData():
@@ -722,6 +733,7 @@ class MainWindow(QMainWindow):
             saved = download_file(
                 attachment.path, target,
                 session_cookie=self.settings.get("session_key") or None,
+                filename=attachment.name,
             )
             extracted = []
             try:
