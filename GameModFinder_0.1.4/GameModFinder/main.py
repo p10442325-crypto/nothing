@@ -234,6 +234,8 @@ class MainWindow(QMainWindow):
         self._worker_mode = ""
         self.current_options: dict[str, Any] = {}
         self._build_ui()
+        self.refresh_creator_list()
+        self.refresh_candidate_list()
 
     def _build_ui(self) -> None:
         central = QWidget(); self.setCentralWidget(central)
