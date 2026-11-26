@@ -260,6 +260,7 @@ class FinderDatabase:
                     followed=CASE WHEN excluded.followed=1 THEN 1 ELSE creators.followed END,
                     updated_at=CURRENT_TIMESTAMP
             """, (service, user_id, name.strip(), int(followed)))
+            self._refresh_creator_stats(con, service, user_id)
 
     def remove_creator(self, service: str, user_id: str) -> None:
         # Unfollowing/removing a creator never deletes their archived posts or favorites.
