@@ -112,6 +112,7 @@ def resolve_thumbnail_url(path_or_url: str, filename: str | None = None) -> str:
 
     parsed = urlsplit(value)
     query = list(parse_qsl(parsed.query, keep_blank_values=True))
+    filename = filename or Path(unquote(parsed.path)).name or None
     if parsed.scheme:
         host = (parsed.hostname or "").lower()
         if parsed.scheme.lower() != "https" or parsed.username or parsed.password:
