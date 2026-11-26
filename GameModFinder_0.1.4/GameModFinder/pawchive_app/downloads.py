@@ -473,7 +473,7 @@ def _curl_transfer(
 
 def _thumbnail_cache_key(url: str, session_cookie: str | None) -> str:
     # Hash the optional session key into the cache key without ever persisting it.
-    raw = url + "\\0" + (session_cookie or "")
+    raw = url + chr(0) + (session_cookie or "")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
