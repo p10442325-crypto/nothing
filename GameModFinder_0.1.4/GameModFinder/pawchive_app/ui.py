@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QPlainTextEdit, QTextBrowser, QProgressBar, QSpinBox, QSplitter, QTabWidget,
-    QVBoxLayout, QWidget, QInputDialog, QStackedWidget,
+    QVBoxLayout, QWidget, QInputDialog, QStackedWidget, QListView, QGridLayout, QScrollArea,
 )
 
 from .api import PawchiveClient, PawchiveError
@@ -45,7 +45,8 @@ QPushButton#Primary:hover { background:#4b89db; }
 QListWidget { border:0; background:transparent; padding:2px; }
 QListWidget::item { background:#182230; border:1px solid #2b3b50; border-radius:8px; padding:10px; margin:3px 1px; }
 QListWidget::item:selected { background:#213a56; border-color:#6596cd; }
-QListWidget#PostList::item { padding:14px 16px; min-height:28px; font-size:11pt; }
+QListWidget#PostList::item { background:#182230; border:1px solid #2b3b50; border-radius:12px; padding:8px; margin:5px; }
+QFrame#AttachmentCard { background:#182230; border:1px solid #304158; border-radius:9px; }
 QTextBrowser#PostContent { background:#101822; border:1px solid #334258; border-radius:10px; padding:14px; font-size:11pt; }
 QTabWidget::pane { border:1px solid #2a394c; border-radius:10px; background:#151d28; }
 QTabBar::tab { background:#161e29; padding:10px 16px; margin-right:3px; border-top-left-radius:7px; border-top-right-radius:7px; }
@@ -102,12 +103,18 @@ class TaskThread(QThread):
 class PostBrowser(QWidget):
     download_requested = Signal(object, object)
 
+    ARCHIVE_SUFFIXES = {
+        ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
+        ".tgz", ".tbz2", ".txz", ".tar.gz", ".tar.bz2", ".tar.xz",
+    }
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"}
+    MAX_THUMBNAIL_WORKERS = 3
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # Post list and post detail are separate full-width screens.
         self.stack = QStackedWidget(self)
         layout.addWidget(self.stack, 1)
 
@@ -115,21 +122,34 @@ class PostBrowser(QWidget):
         list_layout = QVBoxLayout(self.list_page)
         list_layout.setContentsMargins(0, 0, 0, 0)
         list_header = QHBoxLayout()
-        list_heading = QLabel("게시물 목록")
-        list_heading.setObjectName("Section")
+        heading = QLabel("게시물")
+        heading.setObjectName("Section")
         self.list_count = QLabel("0개")
         self.list_count.setObjectName("Subtle")
-        list_header.addWidget(list_heading)
+        list_header.addWidget(heading)
         list_header.addStretch()
         list_header.addWidget(self.list_count)
         list_layout.addLayout(list_header)
 
+        # Rectangular image cards with wrapped titles.
         self.items = QListWidget()
         self.items.setObjectName("PostList")
-        self.items.setIconSize(QSize(32, 32))
-        self.items.setSpacing(5)
+        self.items.setViewMode(QListView.IconMode)
+        self.items.setFlow(QListView.LeftToRight)
+        self.items.setWrapping(True)
+        self.items.setResizeMode(QListView.Adjust)
+        self.items.setMovement(QListView.Static)
+        self.items.setLayoutMode(QListView.Batched)
+        self.items.setBatchSize(48)
+        self.items.setWordWrap(True)
+        self.items.setUniformItemSizes(True)
+        self.items.setIconSize(QSize(176, 126))
+        self.items.setGridSize(QSize(216, 204))
+        self.items.setSpacing(8)
         self.items.itemClicked.connect(self._open_item)
+        self.items.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumbnails)
         list_layout.addWidget(self.items, 1)
+
         self.list_empty = QLabel("표시할 게시물이 없습니다.")
         self.list_empty.setObjectName("Subtle")
         self.list_empty.setAlignment(Qt.AlignCenter)
@@ -139,7 +159,7 @@ class PostBrowser(QWidget):
         self.detail_page = QWidget()
         detail_layout = QVBoxLayout(self.detail_page)
         detail_layout.setContentsMargins(0, 0, 0, 0)
-        detail_layout.setSpacing(10)
+        detail_layout.setSpacing(8)
 
         navigation = QHBoxLayout()
         self.back_button = QPushButton("← 게시물 목록으로")
@@ -158,122 +178,82 @@ class PostBrowser(QWidget):
         self.meta = QLabel("")
         self.meta.setObjectName("Subtle")
         self.meta.setWordWrap(True)
+        detail_layout.addWidget(self.title)
+        detail_layout.addWidget(self.meta)
+
+        # Each attachment has its own download action; no dropdown selection.
+        self.attachments_heading = QLabel("첨부 파일")
+        self.attachments_heading.setObjectName("Section")
+        detail_layout.addWidget(self.attachments_heading)
+        self.attachments_area = QScrollArea()
+        self.attachments_area.setWidgetResizable(True)
+        self.attachments_area.setMaximumHeight(154)
+        self.attachments_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.attachments_host = QWidget()
+        self.attachments_grid = QGridLayout(self.attachments_host)
+        self.attachments_grid.setContentsMargins(2, 2, 2, 2)
+        self.attachments_grid.setSpacing(8)
+        self.attachments_area.setWidget(self.attachments_host)
+        detail_layout.addWidget(self.attachments_area)
 
         self.content = QTextBrowser()
         self.content.setObjectName("PostContent")
         self.content.setOpenExternalLinks(False)
         self.content.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
-        detail_layout.addWidget(self.title)
-        detail_layout.addWidget(self.meta)
         detail_layout.addWidget(self.content, 1)
 
-        # Keep the legacy preview object available for compatibility; the detail
-        # page now renders post images inline at their natural reading width.
+        # Compatibility placeholder: attached images render inline in the body.
         self.image_preview = QLabel("이미지 미리보기", self.detail_page)
         self.image_preview.setObjectName("PostPreview")
-        self.image_preview.setAlignment(Qt.AlignCenter)
         self.image_preview.hide()
-        self._current_thumbnail_url = ""
-        self._thumbnail_workers: set[TaskThread] = set()
+
         self.session_cookie = ""
-
-        file_row = QHBoxLayout()
-        file_label = QLabel("첨부 파일")
-        self.files = QComboBox()
-        self.files.setMinimumWidth(220)
-        self.download_button = QPushButton("선택한 파일 다운로드")
-        self.download_button.setObjectName("Primary")
-        self.download_button.setEnabled(False)
-        self.download_button.clicked.connect(self._download)
-        file_row.addWidget(file_label)
-        file_row.addWidget(self.files, 1)
-        file_row.addWidget(self.download_button)
-        detail_layout.addLayout(file_row)
-
-        self.stack.addWidget(self.detail_page)
-        self.stack.setCurrentWidget(self.list_page)
         self.posts: list[Post] = []
         self.current_post: Post | None = None
+        self.attachment_buttons: list[QPushButton] = []
 
-    def set_session_cookie(self, value: str | None) -> None:
-        self.session_cookie = value or ""
-        setter = getattr(self.content, "set_session_cookie", None)
-        if callable(setter):
-            setter(self.session_cookie)
-
-    def set_posts(self, posts: list[Post]) -> None:
-        self.posts = posts
-        self.items.clear()
-        self.current_post = None
+        self._thumbnail_generation = 0
+        self._thumbnail_items: dict[str, list[QListWidgetItem]] = {}
+        self._thumbnail_queue: list[tuple[str, int]] = []
+        self._thumbnail_pending: set[str] = set()
+        self._thumbnail_loaded: set[str] = set()
+        self._thumbnail_failed_urls: set[str] = set()
+        self._thumbnail_workers: set[TaskThread] = set()
+        self._thumbnail_worker_urls: dict[TaskThread, str] = {}
+        self._thumbnail_debounce = QTimer(self)
+        self._thumbnail_debounce.setSingleShot(True)
+        self._thumbnail_debounce.setInterval(100)
+        self._thumbnail_debounce.timeout.connect(self._queue_visible_thumbnails)
         self.stack.setCurrentWidget(self.list_page)
-        for post in posts:
-            item = QListWidgetItem(post.title or "(제목 없음)")
-            item.setData(Qt.UserRole, post)
-            item.setToolTip(
-                f"{post.service} · 크리에이터 {post.creator_id} · "
-                f"{post.published or '게시일 정보 없음'}"
-            )
-            self.items.addItem(item)
-        self.list_count.setText(f"{len(posts)}개")
-        self.items.setVisible(bool(posts))
-        self.list_empty.setVisible(not posts)
-        self.title.setText("게시물을 선택하세요")
-        self.meta.clear()
-        self.content.clear()
-        self.files.clear()
-        self.download_button.setEnabled(False)
-        self.open_button.setEnabled(False)
 
-    def _open_item(self, item: QListWidgetItem) -> None:
-        row = self.items.row(item)
-        self._show_selected(row)
+    @classmethod
+    def _is_archive(cls, filename: str) -> bool:
+        lowered = (filename or "").lower()
+        return any(lowered.endswith(suffix) for suffix in cls.ARCHIVE_SUFFIXES)
 
-    def _show_selected(self, row: int) -> None:
-        if row < 0 or row >= len(self.posts):
-            return
-        post = self.posts[row]
-        self.current_post = post
-        self.title.setText(post.title)
-        self.meta.setText(
-            f"{post.service} · 크리에이터 {post.creator_id} · 게시물 {post.post_id}\n"
-            f"게시일: {post.published or '정보 없음'}"
-        )
-        self.content.setMarkdown(post.content or "(본문 없음)")
-        self.files.clear()
-        for file in post.files:
-            self.files.addItem(file.name or file.path, file)
-        self.download_button.setEnabled(bool(post.files))
-        self.open_button.setEnabled(True)
-        self.stack.setCurrentWidget(self.detail_page)
+    @classmethod
+    def _is_image(cls, filename: str) -> bool:
+        return Path(filename or "").suffix.lower() in cls.IMAGE_SUFFIXES
 
-    def _back_to_list(self) -> None:
-        self.stack.setCurrentWidget(self.list_page)
-        self.items.setFocus()
-
-    def _load_thumbnail(self, post: Post) -> None:
-        self._current_thumbnail_url = ""
-        self.image_preview.setPixmap(QPixmap())
-        self.image_preview.setText("이미지 미리보기 확인 중…")
+    @classmethod
+    def _thumbnail_url_for_post(cls, post: Post) -> str:
         candidates: list[tuple[str, str | None]] = []
-
         media_objects = [post.raw.get("file")]
         raw_attachments = post.raw.get("attachments")
         if isinstance(raw_attachments, list):
             media_objects.extend(raw_attachments)
+
         for media in media_objects:
-            if isinstance(media, dict):
-                media_name = media.get("name") or media.get("filename")
-                for key in ("thumbnail", "thumbnail_url", "preview", "preview_url", "path", "url"):
-                    value = media.get(key)
-                    if not isinstance(value, str) or not value.strip():
-                        continue
-                    if key in {"path", "url"}:
-                        media_suffix = Path(str(media_name or value.split("?", 1)[0])).suffix.lower()
-                        if media_suffix not in {
-                            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"
-                        }:
-                            continue
-                    candidates.append((value.strip(), str(media_name) if media_name else None))
+            if not isinstance(media, dict):
+                continue
+            name = media.get("name") or media.get("filename")
+            for key in ("thumbnail", "thumbnail_url", "preview", "preview_url", "path", "url"):
+                value = media.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                if key in {"path", "url"} and not cls._is_image(str(name or value.split("?", 1)[0])):
+                    continue
+                candidates.append((value.strip(), str(name) if name else None))
 
         for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
             value = post.raw.get(key)
@@ -287,64 +267,221 @@ class PostBrowser(QWidget):
             candidates.append((source, Path(source.split("?", 1)[0]).name or None))
 
         for attachment in post.files:
-            if Path(attachment.name).suffix.lower() in {
-                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"
-            }:
+            if cls._is_image(attachment.name):
                 candidates.append((attachment.path, attachment.name))
 
         for candidate, filename in candidates:
             try:
-                thumb_url = resolve_thumbnail_url(candidate, filename=filename)
+                return resolve_thumbnail_url(candidate, filename=filename)
             except DownloadError:
                 continue
-            self._current_thumbnail_url = thumb_url
-            worker = TaskThread(lambda url=thumb_url, cookie=self.session_cookie or None: fetch_thumbnail_bytes(url, session_cookie=cookie))
+        return ""
+
+    def set_session_cookie(self, value: str | None) -> None:
+        self.session_cookie = value or ""
+        setter = getattr(self.content, "set_session_cookie", None)
+        if callable(setter):
+            setter(self.session_cookie)
+
+    def set_posts(self, posts: list[Post]) -> None:
+        self._thumbnail_generation += 1
+        generation = self._thumbnail_generation
+        self._thumbnail_queue.clear()
+        self._thumbnail_pending.clear()
+        self._thumbnail_loaded.clear()
+        self._thumbnail_failed_urls.clear()
+        self._thumbnail_items.clear()
+
+        self.posts = posts
+        self.items.clear()
+        self.current_post = None
+        self.stack.setCurrentWidget(self.list_page)
+
+        for post in posts:
+            item = QListWidgetItem(post.title or "(제목 없음)")
+            item.setData(Qt.UserRole, post)
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            item.setToolTip(
+                f"{post.service} · 크리에이터 {post.creator_id} · "
+                f"{post.published or '게시일 정보 없음'}"
+            )
+            item.setSizeHint(QSize(216, 204))
+            thumb_url = self._thumbnail_url_for_post(post)
+            item.setData(Qt.UserRole + 1, thumb_url)
+            if thumb_url:
+                self._thumbnail_items.setdefault(thumb_url, []).append(item)
+            self.items.addItem(item)
+
+        self.list_count.setText(f"{len(posts)}개")
+        self.items.setVisible(bool(posts))
+        self.list_empty.setVisible(not posts)
+        self.title.setText("게시물을 선택하세요")
+        self.meta.clear()
+        self.content.clear()
+        self._clear_attachment_cards()
+        self.open_button.setEnabled(False)
+        QTimer.singleShot(0, lambda expected=generation: self._queue_visible_thumbnails(expected))
+
+    def _schedule_visible_thumbnails(self, *_args) -> None:
+        self._thumbnail_debounce.start()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_thumbnail_debounce"):
+            self._thumbnail_debounce.start()
+
+    def _queue_visible_thumbnails(self, expected_generation: int | None = None) -> None:
+        generation = self._thumbnail_generation if expected_generation is None else expected_generation
+        if generation != self._thumbnail_generation or not self.posts:
+            return
+        viewport = self.items.viewport().rect()
+        buffer = viewport.adjusted(0, -self.items.gridSize().height(), 0, self.items.gridSize().height() * 2)
+        queued = False
+        for index in range(self.items.count()):
+            item = self.items.item(index)
+            url = item.data(Qt.UserRole + 1)
+            if not url or url in self._thumbnail_pending or url in self._thumbnail_loaded or url in self._thumbnail_failed_urls:
+                continue
+            rect = self.items.visualItemRect(item)
+            if rect.isValid() and buffer.intersects(rect):
+                self._thumbnail_pending.add(url)
+                self._thumbnail_queue.append((url, generation))
+                queued = True
+        if not queued and not self._thumbnail_queue and not self._thumbnail_workers:
+            # First layout can happen before the viewport has a useful geometry.
+            for index in range(min(self.items.count(), 12)):
+                item = self.items.item(index)
+                url = item.data(Qt.UserRole + 1)
+                if url and url not in self._thumbnail_pending and url not in self._thumbnail_loaded and url not in self._thumbnail_failed_urls:
+                    self._thumbnail_pending.add(url)
+                    self._thumbnail_queue.append((url, generation))
+        self._pump_thumbnail_queue()
+
+    def _pump_thumbnail_queue(self) -> None:
+        while self._thumbnail_queue and len(self._thumbnail_workers) < self.MAX_THUMBNAIL_WORKERS:
+            url, generation = self._thumbnail_queue.pop(0)
+            if generation != self._thumbnail_generation:
+                self._thumbnail_pending.discard(url)
+                continue
+            worker = TaskThread(
+                lambda image_url=url, cookie=self.session_cookie or None:
+                    fetch_thumbnail_bytes(image_url, session_cookie=cookie)
+            )
             self._thumbnail_workers.add(worker)
+            self._thumbnail_worker_urls[worker] = url
             worker.succeeded.connect(
-                lambda payload, expected=thumb_url: self._thumbnail_loaded(payload, expected)
+                lambda payload, image_url=url, gen=generation:
+                    self._thumbnail_loaded_for_card(image_url, payload, gen)
             )
             worker.failed.connect(
-                lambda message, expected=thumb_url: self._thumbnail_failed(message, expected)
+                lambda message, image_url=url, gen=generation:
+                    self._thumbnail_failed_for_card(image_url, message, gen)
             )
             worker.finished.connect(
-                lambda item=worker: self._thumbnail_workers.discard(item)
+                lambda item=worker, image_url=url:
+                    self._thumbnail_worker_finished(item, image_url)
             )
             worker.start()
-            return
 
-        self.image_preview.setText("미리보기 가능한 이미지 첨부가 없습니다.")
-
-    def _thumbnail_failed(self, message: str, expected_url: str) -> None:
-        if expected_url != self._current_thumbnail_url:
-            return
-        self.image_preview.setText("썸네일을 불러오지 못했습니다. 원본 게시물에서 확인해 주세요.")
-        self.image_preview.setToolTip(message)
-
-    def _thumbnail_loaded(self, payload: bytes, expected_url: str) -> None:
-        if expected_url != self._current_thumbnail_url:
+    def _thumbnail_loaded_for_card(self, url: str, payload: bytes, generation: int) -> None:
+        if generation != self._thumbnail_generation:
             return
         pixmap = QPixmap()
         if not pixmap.loadFromData(payload):
-            self.image_preview.setText("Pawchive 응답을 이미지로 해석할 수 없습니다.")
+            self._thumbnail_failed_urls.add(url)
             return
-        self.image_preview.setToolTip("")
-        self.image_preview.setPixmap(pixmap.scaled(
-            max(180, self.image_preview.width() - 16),
-            max(100, self.image_preview.height() - 12),
-            Qt.KeepAspectRatio,
+        width, height = 176, 126
+        scaled = pixmap.scaled(
+            QSize(width, height),
+            Qt.KeepAspectRatioByExpanding,
             Qt.SmoothTransformation,
-        ))
-        selected = self.items.currentItem()
-        if selected:
-            selected.setIcon(QIcon(pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+        )
+        left = max(0, (scaled.width() - width) // 2)
+        top = max(0, (scaled.height() - height) // 2)
+        icon = QIcon(scaled.copy(left, top, width, height))
+        for item in self._thumbnail_items.get(url, []):
+            item.setIcon(icon)
+        self._thumbnail_loaded.add(url)
 
-    def _download(self) -> None:
-        if self.current_post and self.files.currentData():
-            self.download_requested.emit(self.current_post, self.files.currentData())
+    def _thumbnail_failed_for_card(self, url: str, message: str, generation: int) -> None:
+        if generation != self._thumbnail_generation:
+            return
+        self._thumbnail_failed_urls.add(url)
+        for item in self._thumbnail_items.get(url, []):
+            item.setToolTip(item.toolTip() + "\n미리보기를 불러오지 못했습니다: " + message)
+
+    def _thumbnail_worker_finished(self, worker: TaskThread, url: str) -> None:
+        self._thumbnail_workers.discard(worker)
+        self._thumbnail_worker_urls.pop(worker, None)
+        self._thumbnail_pending.discard(url)
+        worker.deleteLater()
+        self._pump_thumbnail_queue()
+
+    def _open_item(self, item: QListWidgetItem) -> None:
+        self._show_selected(self.items.row(item))
+
+    def _show_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.posts):
+            return
+        post = self.posts[row]
+        self.current_post = post
+        self.title.setText(post.title)
+        self.meta.setText(
+            f"{post.service} · 크리에이터 {post.creator_id} · 게시물 {post.post_id}\n"
+            f"게시일: {post.published or '정보 없음'}"
+        )
+        self.content.setMarkdown(post.content or "(본문 없음)")
+        self._populate_attachment_cards(post)
+        self.open_button.setEnabled(True)
+        self.stack.setCurrentWidget(self.detail_page)
+
+    def _clear_attachment_cards(self) -> None:
+        self.attachment_buttons.clear()
+        while self.attachments_grid.count():
+            item = self.attachments_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.attachments_heading.setVisible(False)
+        self.attachments_area.setVisible(False)
+
+    def _populate_attachment_cards(self, post: Post) -> None:
+        self._clear_attachment_cards()
+        if not post.files:
+            return
+        self.attachments_heading.setVisible(True)
+        self.attachments_area.setVisible(True)
+        for index, attachment in enumerate(post.files):
+            card = QFrame()
+            card.setObjectName("AttachmentCard")
+            row = QHBoxLayout(card)
+            row.setContentsMargins(9, 7, 9, 7)
+            icon = QLabel("📦" if self._is_archive(attachment.name) else "📎")
+            icon.setMinimumWidth(28)
+            filename = QLabel(attachment.name or attachment.path.rsplit("/", 1)[-1])
+            filename.setWordWrap(True)
+            filename.setToolTip(attachment.path)
+            button = QPushButton("다운로드")
+            button.setObjectName("Primary")
+            button.clicked.connect(
+                lambda checked=False, selected=attachment, source=post:
+                    self.download_requested.emit(source, selected)
+            )
+            row.addWidget(icon)
+            row.addWidget(filename, 1)
+            row.addWidget(button)
+            grid_row, grid_col = divmod(index, 2)
+            self.attachments_grid.addWidget(card, grid_row, grid_col)
+            self.attachment_buttons.append(button)
+
+    def _back_to_list(self) -> None:
+        self.stack.setCurrentWidget(self.list_page)
+        self.items.setFocus()
 
     def _open_post(self) -> None:
         if self.current_post:
             QDesktopServices.openUrl(QUrl(self.current_post.post_url))
+
 
 class SettingsPage(QWidget):
     changed = Signal()
