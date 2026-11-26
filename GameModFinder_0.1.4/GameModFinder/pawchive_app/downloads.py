@@ -12,9 +12,7 @@ import tempfile
 import zipfile
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
-from urllib.request import Request, urlopen
 
 from .api import APP_USER_AGENT
 
@@ -219,7 +217,7 @@ def _curl_transfer(
             if session_cookie:
                 if any(ch in session_cookie for ch in "\r\n;"):
                     raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
-                command.extend(["-H", f"Cookie: session={session_cookie}"])
+                command.extend(["-b", f"session={session_cookie}"])
             if offset:
                 command.extend(["-C", str(offset)])
             command.extend(["-o", str(target), url])
