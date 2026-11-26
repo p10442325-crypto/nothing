@@ -163,7 +163,10 @@ class PostBrowser(QWidget):
         self.list_empty = QLabel("압축파일이 첨부된 게시물이 없습니다.")
         self.list_empty.setObjectName("Subtle")
         self.list_empty.setAlignment(Qt.AlignCenter)
-        list_layout.addWidget(self.list_empty)
+        self.list_content = QStackedWidget(self.list_page)
+        self.list_content.addWidget(self.items)
+        self.list_content.addWidget(self.list_empty)
+        list_layout.addWidget(self.list_content, 1)
         self.stack.addWidget(self.list_page)
 
         self.detail_page = QWidget()
@@ -364,15 +367,14 @@ class PostBrowser(QWidget):
             f"{visible_count:,} / {len(self.posts):,}개" if needle
             else f"{len(self.posts):,}개"
         )
-        self.items.setVisible(visible_count > 0)
         if not self.posts:
             self.list_empty.setText("압축파일이 첨부된 게시물이 없습니다.")
-            self.list_empty.setVisible(True)
+            self.list_content.setCurrentWidget(self.list_empty)
         elif visible_count == 0:
             self.list_empty.setText("검색 결과가 없습니다.")
-            self.list_empty.setVisible(True)
+            self.list_content.setCurrentWidget(self.list_empty)
         else:
-            self.list_empty.setVisible(False)
+            self.list_content.setCurrentWidget(self.items)
         self._thumbnail_debounce.start()
 
     def _refresh_card_layout(self, generation: int) -> None:
@@ -671,6 +673,9 @@ class MainWindow(QMainWindow):
         self.workers: set[TaskThread] = set()
         self.download_workers: set[TaskThread] = set()
         self.preview_creator: Creator | None = None
+        self._creator_tag_owner: tuple[str, str] | None = None
+        self._creator_tag_request: tuple[str, str] | None = None
+        self._creator_tag_workers: set[TaskThread] = set()
         self._build_ui()
         for browser in (self.following_browser, self.creator_browser, self.explore_browser):
             browser.set_session_cookie(self.settings.get("session_key") or None)
@@ -729,6 +734,14 @@ class MainWindow(QMainWindow):
         self.creator_unfollow.clicked.connect(self.unfollow_selected_creator)
         creator_top.addWidget(self.creator_refresh); creator_top.addWidget(self.creator_unfollow)
         creators_layout.addLayout(creator_top)
+        creator_tag_row = QHBoxLayout()
+        creator_tag_row.addWidget(QLabel("이 크리에이터의 태그"))
+        self.creator_tag_combo = QComboBox()
+        self.creator_tag_combo.addItem("전체 게시물", "")
+        self.creator_tag_combo.setEnabled(False)
+        self.creator_tag_combo.currentIndexChanged.connect(self._creator_tag_changed)
+        creator_tag_row.addWidget(self.creator_tag_combo, 1)
+        creators_layout.addLayout(creator_tag_row)
         splitter = QSplitter(Qt.Horizontal)
         self.creator_list = QListWidget()
         self.creator_list.currentRowChanged.connect(self._creator_selected)
@@ -916,12 +929,82 @@ class MainWindow(QMainWindow):
 
     def _creator_selected(self, row: int) -> None:
         item = self.creator_list.item(row)
+        self.creator_tag_combo.blockSignals(True)
+        self.creator_tag_combo.clear()
+        self.creator_tag_combo.addItem("전체 게시물", "")
+        self.creator_tag_combo.setEnabled(False)
+        self.creator_tag_combo.blockSignals(False)
+        self._creator_tag_owner = None
         if not item:
             self.creator_browser.set_posts([])
             return
         service, creator_id = item.data(Qt.UserRole)
+        self._creator_tag_owner = (service, creator_id)
         rows = self.database.posts_for_creator(service, creator_id)
         self.creator_browser.set_posts([self._post_from_row(record) for record in rows])
+        self._load_creator_tags(service, creator_id)
+
+    def _load_creator_tags(self, service: str, creator_id: str) -> None:
+        owner = (service, creator_id)
+        self._creator_tag_request = owner
+
+        def task():
+            with self._client() as client:
+                return client.creator_tags(service, creator_id)
+
+        worker = TaskThread(task)
+        self._creator_tag_workers.add(worker)
+
+        def done(tags):
+            if self._creator_tag_owner != owner or self._creator_tag_request != owner:
+                return
+            self.creator_tag_combo.blockSignals(True)
+            self.creator_tag_combo.clear()
+            self.creator_tag_combo.addItem("전체 게시물", "")
+            for tag in tags:
+                self.creator_tag_combo.addItem(tag, tag)
+            self.creator_tag_combo.setEnabled(bool(tags))
+            self.creator_tag_combo.blockSignals(False)
+            self.status.setText(
+                f"{owner[1]} 태그 {len(tags)}개 확인" if tags else "크리에이터 태그가 없습니다."
+            )
+
+        def failed(message):
+            if self._creator_tag_owner == owner:
+                self.creator_tag_combo.setEnabled(False)
+                self.status.setText("크리에이터 태그를 불러오지 못했습니다: " + message)
+
+        worker.succeeded.connect(done)
+        worker.failed.connect(failed)
+        worker.finished.connect(lambda current=worker: self._creator_tag_workers.discard(current))
+        worker.start()
+
+    def _creator_tag_changed(self, _index: int) -> None:
+        item = self.creator_list.currentItem()
+        tag = self.creator_tag_combo.currentData()
+        if not item or not tag:
+            if item:
+                service, creator_id = item.data(Qt.UserRole)
+                rows = self.database.posts_for_creator(service, creator_id)
+                self.creator_browser.set_posts([self._post_from_row(row) for row in rows])
+            return
+
+        service, creator_id = item.data(Qt.UserRole)
+        owner = (service, creator_id)
+
+        def task():
+            with self._client() as client:
+                posts = client.all_creator_posts(service, creator_id, tag=tag)
+            self.database.save_posts(posts)
+            return posts
+
+        def done(posts):
+            if self._creator_tag_owner != owner or self.creator_tag_combo.currentData() != tag:
+                return
+            self.creator_browser.set_posts(posts)
+            self.status.setText(f"태그 '{tag}' 게시물 {len(posts)}개")
+
+        self._run_task(f"'{tag}' 태그 게시물 불러오는 중…", task, done)
 
     def refresh_selected_creator(self) -> None:
         item = self.creator_list.currentItem()
