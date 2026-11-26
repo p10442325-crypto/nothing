@@ -154,7 +154,7 @@ class PostBrowser(QWidget):
         self.items.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumbnails)
         list_layout.addWidget(self.items, 1)
 
-        self.list_empty = QLabel("표시할 게시물이 없습니다.")
+        self.list_empty = QLabel("압축파일이 첨부된 게시물이 없습니다.")
         self.list_empty.setObjectName("Subtle")
         self.list_empty.setAlignment(Qt.AlignCenter)
         list_layout.addWidget(self.list_empty)
@@ -424,7 +424,7 @@ class PostBrowser(QWidget):
         if not pixmap.loadFromData(payload):
             self._thumbnail_failed_urls.add(url)
             return
-        width, height = 176, 126
+        width, height = self._card_icon_width, self._card_icon_height
         scaled = pixmap.scaled(
             QSize(width, height),
             Qt.KeepAspectRatioByExpanding,
