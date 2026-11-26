@@ -25,6 +25,8 @@ class DesktopSmokeTests(unittest.TestCase):
             ["팔로잉", "크리에이터", "크리에이터 찾기", "전체 탐색", "다운로드", "설정"],
         )
         self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
+        self.assertTrue(hasattr(window.following_browser, "image_preview"))
+        self.assertTrue(hasattr(window.following_browser, "network"))
         window.close()
 
 
