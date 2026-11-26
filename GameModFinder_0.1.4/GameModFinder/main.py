@@ -414,6 +414,7 @@ class MainWindow(QMainWindow):
             results = payload if isinstance(payload, list) else []
             self.db.upsert_results(results)
             self.refresh_candidate_list()
+            self.discover_button.setEnabled(True)
             self.discovery_status.setText(
                 f"발굴 완료 · 게시물 {len(results)}개에서 제작자 후보를 집계했습니다."
             )
@@ -462,9 +463,12 @@ class MainWindow(QMainWindow):
         self.results = self.db.search_local(queries, game_key=game_key, limit=500)
         for result in self.results:
             result["clean_content"] = clean_html(result["post"].content)
+            is_favorite = self.db.is_favorite(result["post"].key)
             if not self.mod_boost_check.isChecked():
                 result["score"] = result.get("base_score", result["score"])
-            if not self.favorite_boost_check.isChecked() and self.db.is_favorite(result["post"].key):
+                if self.favorite_boost_check.isChecked() and is_favorite:
+                    result["score"] += 8
+            elif not self.favorite_boost_check.isChecked() and is_favorite:
                 result["score"] = max(0, result["score"] - 8)
         self.results.sort(key=lambda r: (r["score"], r["post"].published or r["post"].added), reverse=True)
         self._clear_detail()
@@ -495,7 +499,6 @@ class MainWindow(QMainWindow):
             options, self.aliases, self.settings,
         )
         self._launch_worker(worker, "discover")
-        self.thread.finished.connect(lambda: self.discover_button.setEnabled(True))
 
     def _populate_current_list(self) -> None:
         widget = self._current_list()
