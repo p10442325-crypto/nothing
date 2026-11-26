@@ -229,7 +229,7 @@ class PawchiveClient:
                       query: str | None = None) -> list[Post]:
         if offset < 0 or offset % 50:
             raise ValueError("Pawchive offset은 0 이상의 50 단위여야 합니다.")
-        path = f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}/posts"
+        path = f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}"
         raw = self._list_payload(
             self._get_json(path, {"q": query, "o": offset}),
             "크리에이터 게시물 목록",
@@ -241,6 +241,21 @@ class PawchiveClient:
                 result.append(Post.from_api(item, creator))
             except ValueError:
                 continue
+        return result
+
+    def all_creator_posts(self, service: str, creator_id: str, query: str | None = None,
+                         max_pages: int | None = None) -> list[Post]:
+        """Fetch every available 50-item page, respecting the one-request/second limit."""
+        result: list[Post] = []
+        offset = 0
+        pages = 0
+        while max_pages is None or pages < max_pages:
+            page = self.creator_posts(service, creator_id, offset=offset, query=query)
+            result.extend(page)
+            pages += 1
+            if len(page) < 50:
+                break
+            offset += 50
         return result
 
     def recent_posts(self, query: str | None = None, offset: int = 0) -> list[Post]:
@@ -256,6 +271,20 @@ class PawchiveClient:
                 result.append(Post.from_api(item))
             except ValueError:
                 continue
+        return result
+
+    def all_recent_posts(self, query: str | None = None, max_pages: int | None = None) -> list[Post]:
+        """Fetch every available 50-item page from the global feed."""
+        result: list[Post] = []
+        offset = 0
+        pages = 0
+        while max_pages is None or pages < max_pages:
+            page = self.recent_posts(query=query, offset=offset)
+            result.extend(page)
+            pages += 1
+            if len(page) < 50:
+                break
+            offset += 50
         return result
 
     def post_detail(self, service: str, creator_id: str, post_id: str) -> dict[str, Any]:
