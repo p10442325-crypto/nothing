@@ -41,53 +41,52 @@ def pawchive_image_url(path_or_url: str, filename: str = "") -> str:
     value = (path_or_url or "").strip()
     if not value:
         return ""
+
     parsed = urlsplit(value)
     query = list(parse_qsl(parsed.query, keep_blank_values=True))
+    path = parsed.path
     if parsed.scheme:
-        if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() not in IMAGE_HOSTS:
+        if parsed.scheme.lower() != "https":
             return ""
-        path = parsed.path
         host = (parsed.hostname or "").lower()
-        if host == "img.pawchive.pw" and path.startswith("/thumbnail/"):
-            if filename and not any(key == "f" for key, _ in query):
-                query.append(("f", filename))
-            return urlunsplit(("https", "img.pawchive.pw", path, urlencode(query), ""))
-        if host in {"pawchive.pw", "www.pawchive.pw"}:
-            path = _safe_segments(path)
-            if path.startswith("/data/"):
-                thumbnail_path = "/thumbnail" + path
-                if filename and not any(key == "f" for key, _ in query):
-                    query.append(("f", filename))
-                return urlunsplit((
-                    "https", "img.pawchive.pw",
-                    quote(thumbnail_path, safe="/:@!        if host == "img.pawchive.pw" and path.startswith("/thumbnail/"):
-            if filename and not any(key == "f" for key, _ in query):
-                query.append(("f", filename))
-            return urlunsplit(("https", "img.pawchive.pw", path, urlencode(query), ""))
-        if host in {"pawchive.pw", "www.pawchive.pw"}:
-            return value'()*+,;=-._~"),
-                    urlencode(query), "",
-                ))
+        if host not in IMAGE_HOSTS:
+            return ""
+        path = _safe_segments(path)
+        if not path:
+            return ""
+        if host == "img.pawchive.pw" and path.startswith("/thumbnail/data/"):
+            thumbnail_path = path
+        elif path.startswith("/data/"):
+            thumbnail_path = "/thumbnail" + path
+        elif host in {"pawchive.pw", "www.pawchive.pw"}:
             return value
+        else:
+            return ""
     else:
         if parsed.netloc:
             return ""
-        path = parsed.path
+        path = _safe_segments(path)
+        if not path:
+            return ""
+        path = "/" + path.lstrip("/")
+        if path.startswith("/thumbnail/data/"):
+            thumbnail_path = path
+        elif path.startswith("/data/"):
+            thumbnail_path = "/thumbnail" + path
+        else:
+            if path.startswith("/f/") or path == "/f":
+                return ""
+            thumbnail_path = "/thumbnail/data/" + path.lstrip("/")
 
-    path = _safe_segments(path)
-    if not path:
-        return ""
-    path = "/" + path.lstrip("/")
-    if path == "/data" or path.startswith("/data/"):
-        thumbnail_path = "/thumbnail" + path
-    elif path.startswith("/thumbnail/data/"):
-        thumbnail_path = path
-    else:
-        thumbnail_path = "/thumbnail/data/" + path.lstrip("/")
     if filename and not any(key == "f" for key, _ in query):
         query.append(("f", filename))
-    return urlunsplit(("https", "img.pawchive.pw", quote(thumbnail_path, safe="/:@!$&'()*+,;=-._~"), urlencode(query), ""))
-
+    return urlunsplit((
+        "https",
+        "img.pawchive.pw",
+        quote(thumbnail_path, safe="/:@!$&'()*+,;=-._~"),
+        urlencode(query),
+        "",
+    ))
 
 def _safe_href(value: str) -> str:
     raw = (value or "").strip()
