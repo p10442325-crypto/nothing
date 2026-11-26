@@ -23,6 +23,8 @@ FILES_HOST = "file.pawchive.pw"
 _DOWNLOAD_LOCK = threading.Lock()
 _LAST_DOWNLOAD_AT = 0.0
 DOWNLOAD_INTERVAL_SECONDS = 1.0
+# Share a five-request in-flight budget across file and thumbnail hosts.
+_TRANSFER_SEMAPHORE = threading.BoundedSemaphore(5)
 _THUMB_CACHE_LOCK = threading.Lock()
 _THUMB_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _THUMB_CACHE_SIZE = 0
@@ -567,10 +569,11 @@ def fetch_thumbnail_bytes(
         if not payload:
             with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
                 temporary = Path(directory) / "thumbnail.bin"
-                _curl_transfer(
-                    url, temporary, timeout, session_cookie=session_cookie,
-                    resume=False, attempts=2,
-                )
+                with _TRANSFER_SEMAPHORE:
+                    _curl_transfer(
+                        url, temporary, timeout, session_cookie=session_cookie,
+                        resume=False, attempts=2,
+                    )
                 payload = temporary.read_bytes()
 
             if not payload or len(payload) > 16 * 1024 * 1024:
@@ -617,10 +620,11 @@ def download_file(
         raise FileExistsError(f"파일이 이미 존재합니다: {target}")
     temporary = target.with_name(target.name + ".part")
     try:
-        _curl_transfer(
-            url, temporary, timeout, session_cookie=session_cookie,
-            resume=True, attempts=5,
-        )
+        with _TRANSFER_SEMAPHORE:
+            _curl_transfer(
+                url, temporary, timeout, session_cookie=session_cookie,
+                resume=True, attempts=5,
+            )
         os.replace(temporary, target)
         return target
     except Exception:
