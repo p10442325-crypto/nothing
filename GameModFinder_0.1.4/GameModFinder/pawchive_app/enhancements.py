@@ -316,13 +316,14 @@ class _ThumbnailFetchThread(QThread):
     loaded = Signal(str, bytes)
     failed = Signal(str, str)
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, session_cookie: str | None = None) -> None:
         super().__init__()
         self.url = url
+        self.session_cookie = session_cookie
 
     def run(self) -> None:
         try:
-            self.loaded.emit(self.url, fetch_thumbnail_bytes(self.url))
+            self.loaded.emit(self.url, fetch_thumbnail_bytes(self.url, session_cookie=self.session_cookie))
         except Exception as exc:
             self.failed.emit(self.url, str(exc))
 
@@ -337,7 +338,11 @@ class PostTextBrowser(QTextBrowser):
         self.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
         self._image_cache: dict[str, QImage] = {}
         self._pending: dict[str, _ThumbnailFetchThread] = {}
+        self.session_cookie = ""
         self._image_failures: set[str] = set()
+
+    def set_session_cookie(self, value: str | None) -> None:
+        self.session_cookie = value or ""
 
     def setHtml(self, text: str) -> None:
         self._image_failures.clear()
@@ -357,7 +362,7 @@ class PostTextBrowser(QTextBrowser):
                 if cached is not None:
                     return cached
                 if key not in self._pending and key not in self._image_failures:
-                    worker = _ThumbnailFetchThread(key)
+                    worker = _ThumbnailFetchThread(key, self.session_cookie or None)
                     self._pending[key] = worker
                     worker.loaded.connect(self._image_loaded)
                     worker.failed.connect(self._image_failed)
