@@ -488,17 +488,17 @@ class MainWindow(QMainWindow):
             return
 
         def task():
-            client = self._client()
             total, failed = 0, []
-            for creator in creators:
-                service, creator_id = creator["service"], creator["creator_id"]
-                try:
-                    posts = client.creator_posts(service, creator_id, offset=0)
-                    total += self.database.save_posts(posts)
-                    self.database.update_sync_state(service, creator_id, 50, datetime.now().isoformat(), "")
-                except Exception as exc:
-                    failed.append(f"{creator.get('name') or creator_id}: {exc}")
-                    self.database.update_sync_state(service, creator_id, 0, "", str(exc))
+            with self._client() as client:
+                for creator in creators:
+                    service, creator_id = creator["service"], creator["creator_id"]
+                    try:
+                        posts = client.creator_posts(service, creator_id, offset=0)
+                        total += self.database.save_posts(posts)
+                        self.database.update_sync_state(service, creator_id, 50, datetime.now().isoformat(), "")
+                    except Exception as exc:
+                        failed.append(f"{creator.get('name') or creator_id}: {exc}")
+                        self.database.update_sync_state(service, creator_id, 0, "", str(exc))
             return total, failed
 
         def done(result):
@@ -528,7 +528,8 @@ class MainWindow(QMainWindow):
         service, creator_id = item.data(Qt.UserRole)
 
         def task():
-            posts = self._client().creator_posts(service, creator_id, offset=0)
+            with self._client() as client:
+                posts = client.creator_posts(service, creator_id, offset=0)
             self.database.save_posts(posts)
             self.database.update_sync_state(service, creator_id, 50, datetime.now().isoformat(), "")
             return posts
@@ -566,7 +567,8 @@ class MainWindow(QMainWindow):
 
     def _lookup_creator(self, service: str, creator_id: str) -> None:
         def task():
-            return self._client().resolve_creator(service, creator_id)
+            with self._client() as client:
+                return client.resolve_creator(service, creator_id)
 
         def done(creator):
             self.preview_creator = creator
@@ -598,7 +600,8 @@ class MainWindow(QMainWindow):
             return
 
         def task():
-            posts = self._client().recent_posts(query or None, offset=0)
+            with self._client() as client:
+                posts = client.recent_posts(query or None, offset=0)
             self.database.save_posts(posts)
             return posts
 
