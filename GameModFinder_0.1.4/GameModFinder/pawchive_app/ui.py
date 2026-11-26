@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl, QSize
 from PySide6.QtGui import QDesktopServices, QPixmap, QIcon
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import APP_USER_AGENT, PawchiveClient, PawchiveError
-from .downloads import DownloadError, download_file, resolve_file_url, safe_extract_archive
+from .downloads import (DownloadError, download_file, resolve_file_url, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url
 from .repository import LocalRepository
 
@@ -214,9 +214,9 @@ class PostBrowser(QWidget):
             if isinstance(value, str) and value.strip():
                 candidates.append(value.strip())
         # Prefer supported Pawchive image links embedded in the post body too.
-        for match in re.findall(r'<img[^>]+src=["\\']([^"\\']+)', post.content or "", flags=re.I):
+        for match in re.findall(r"""<img[^>]+src=["']([^"']+)""", post.content or "", flags=re.I):
             candidates.append(match)
-        for match in re.findall(r'!\\[[^\\]]*\\]\\(([^)]+)\\)', post.content or ""):
+        for match in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", post.content or ""):
             candidates.append(match.strip().strip("<>"))
         for attachment in post.files:
             if Path(attachment.name).suffix.lower() in {
