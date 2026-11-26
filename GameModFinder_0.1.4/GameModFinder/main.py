@@ -579,8 +579,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def parse_creator_url(value: str) -> tuple[str, str]:
         parsed = urlparse(value.strip())
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise ValueError("Pawchive 제작자 URL을 입력해 주세요.")
+        if parsed.scheme not in ("http", "https") or parsed.netloc.casefold() not in ("pawchive.pw", "www.pawchive.pw", "pawchive.st", "www.pawchive.st"):
+            raise ValueError("pawchive.pw 또는 pawchive.st 제작자 URL을 입력해 주세요.")
         parts = [part for part in parsed.path.split("/") if part]
         if len(parts) >= 3 and parts[1] == "user":
             return parts[0], parts[2]
