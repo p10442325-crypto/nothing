@@ -7,6 +7,7 @@ import tarfile
 import unittest
 import zipfile
 from pathlib import Path
+from urllib.error import URLError
 from unittest.mock import patch
 
 from pawchive_app.api import PawchiveClient
@@ -73,6 +74,21 @@ class ApiTests(unittest.TestCase):
         request = mock_urlopen.call_args.args[0]
         self.assertIn("/creators", request.full_url)
         self.assertIn("PawchiveModFinder", request.get_header("User-agent"))
+
+    @patch.object(
+        PawchiveClient,
+        "_browser_get_text",
+        return_value='[{"id":"9","service":"fanbox","name":"Browser Fallback"}]',
+    )
+    @patch(
+        "pawchive_app.api.urlopen",
+        side_effect=URLError(ConnectionResetError(10054, "connection reset")),
+    )
+    def test_windows_connection_reset_uses_browser_fallback(self, _mock_urlopen, mock_browser):
+        with PawchiveClient() as client:
+            creators = client.list_creators()
+        self.assertEqual(creators[0].name, "Browser Fallback")
+        mock_browser.assert_called_once()
 
     @patch("pawchive_app.api.urlopen")
     def test_creator_post_route_and_offset(self, mock_urlopen):
