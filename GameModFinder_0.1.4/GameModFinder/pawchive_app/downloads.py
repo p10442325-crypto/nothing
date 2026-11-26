@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import stat
-import time
+import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
@@ -12,7 +11,6 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from .api import APP_USER_AGENT
-
 
 FILES_HOST = "file.pawchive.pw"
 
@@ -22,7 +20,6 @@ class DownloadError(RuntimeError):
 
 
 def resolve_file_url(path_or_url: str) -> str:
-    """Resolve API file paths only on Pawchive's dedicated file host."""
     value = path_or_url.strip()
     if not value:
         raise DownloadError("파일 경로가 비어 있습니다.")
@@ -37,17 +34,9 @@ def resolve_file_url(path_or_url: str) -> str:
     return f"https://{FILES_HOST}{quote(normalized, safe='/%:@')}"
 
 
-def download_file(
-    path_or_url: str,
-    destination: str | Path,
-    timeout: int = 60,
-    session_cookie: str | None = None,
-) -> Path:
-    """Download a single file with a transparent app User-Agent.
-
-    The caller should serialize starts to at most one new file request per second
-    and keep no more than five downloads active, matching Pawchive guidance.
-    """
+def download_file(path_or_url: str, destination: str | Path, timeout: int = 60,
+                  session_cookie: str | None = None) -> Path:
+    """Download one file; an optional session cookie is sent to the file host only."""
     url = resolve_file_url(path_or_url)
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -68,48 +57,80 @@ def download_file(
         os.replace(temporary, target)
         return target
     except (HTTPError, URLError, OSError, TimeoutError) as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+        temporary.unlink(missing_ok=True)
         if isinstance(exc, HTTPError) and exc.code in (401, 403):
-            raise DownloadError("파일 접근이 거부됐습니다. 이 파일에 접근 권한이 필요할 수 있습니다.") from exc
+            raise DownloadError("파일 접근이 거부됐습니다. 해당 파일에 세션 권한이 필요할 수 있습니다.") from exc
         raise DownloadError(f"파일 다운로드 실패: {exc}") from exc
 
 
-def safe_extract_zip(archive_path: str | Path, destination: str | Path) -> list[Path]:
-    """Extract ZIP members only when every target stays inside destination.
+def _safe_target(root: Path, member_name: str) -> Path:
+    normalized = member_name.replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    if relative.is_absolute() or any(part in ("..", "") for part in relative.parts):
+        raise DownloadError(f"안전하지 않은 압축 경로: {member_name}")
+    target = (root / Path(*relative.parts)).resolve()
+    if target != root and root not in target.parents:
+        raise DownloadError(f"압축 해제 경로가 대상 폴더를 벗어납니다: {member_name}")
+    return target
 
-    Symlink entries are rejected. Existing files are never overwritten.
-    """
-    archive = Path(archive_path)
-    root = Path(destination).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    extracted: list[Path] = []
+
+def safe_extract_zip(archive_path: str | Path, destination: str | Path) -> list[Path]:
+    archive, root = Path(archive_path), Path(destination).resolve()
     with zipfile.ZipFile(archive) as zipped:
-        members = zipped.infolist()
-        planned: list[tuple[zipfile.ZipInfo, Path]] = []
-        for member in members:
-            raw = member.filename.replace("\\", "/")
-            relative = PurePosixPath(raw)
-            if relative.is_absolute() or any(part in ("..", "") for part in relative.parts):
-                raise DownloadError(f"안전하지 않은 ZIP 경로: {member.filename}")
+        planned = []
+        for member in zipped.infolist():
+            target = _safe_target(root, member.filename)
             mode = (member.external_attr >> 16) & 0xFFFF
             if stat.S_ISLNK(mode):
                 raise DownloadError(f"ZIP 심볼릭 링크는 추출하지 않습니다: {member.filename}")
-            target = (root / Path(*relative.parts)).resolve()
-            if target != root and root not in target.parents:
-                raise DownloadError(f"압축 해제 경로가 대상 폴더를 벗어납니다: {member.filename}")
             if target.exists():
                 raise FileExistsError(f"압축 해제 대상이 이미 존재합니다: {target}")
             planned.append((member, target))
-
+        root.mkdir(parents=True, exist_ok=True)
+        extracted = []
         for member, target in planned:
             if member.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zipped.open(member) as source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                extracted.append(target)
+        return extracted
+
+
+def safe_extract_tar(archive_path: str | Path, destination: str | Path) -> list[Path]:
+    archive, root = Path(archive_path), Path(destination).resolve()
+    with tarfile.open(archive, mode="r:*") as tar:
+        planned = []
+        for member in tar.getmembers():
+            target = _safe_target(root, member.name)
+            if not (member.isfile() or member.isdir()):
+                raise DownloadError(f"압축 링크 또는 특수 파일은 추출하지 않습니다: {member.name}")
+            if target.exists():
+                raise FileExistsError(f"압축 해제 대상이 이미 존재합니다: {target}")
+            planned.append((member, target))
+        root.mkdir(parents=True, exist_ok=True)
+        extracted = []
+        for member, target in planned:
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            with zipped.open(member) as source, target.open("xb") as output:
+            source = tar.extractfile(member)
+            if source is None:
+                raise DownloadError(f"압축 파일을 읽지 못했습니다: {member.name}")
+            with source, target.open("xb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
             extracted.append(target)
-    return extracted
+        return extracted
+
+
+def safe_extract_archive(archive_path: str | Path, destination: str | Path) -> list[Path]:
+    """Safely extract ZIP or TAR-family archives; unsupported formats are left intact."""
+    archive = Path(archive_path)
+    if zipfile.is_zipfile(archive):
+        return safe_extract_zip(archive, destination)
+    if tarfile.is_tarfile(archive):
+        return safe_extract_tar(archive, destination)
+    return []
