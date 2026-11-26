@@ -1,0 +1,70 @@
+{
+  "genshin": {
+    "name": "원신",
+    "aliases": ["Genshin Impact", "Genshin", "原神"],
+    "characters": {
+      "라이덴 쇼군": ["라이덴", "Raiden Shogun", "Raiden", "Ei", "Baal", "雷電将軍", "雷电将军"],
+      "푸리나": ["Furina", "Focalors", "芙宁娜", "フリーナ"],
+      "호두": ["Hu Tao", "Hutao", "胡桃", "フータオ"],
+      "나히다": ["Nahida", "Lesser Lord Kusanali", "纳西妲", "ナヒーダ"],
+      "감우": ["Ganyu", "甘雨", "甘雨"],
+      "야란": ["Yelan", "夜兰", "夜蘭"],
+      "닐루": ["Nilou", "妮露", "ニィロウ"],
+      "각청": ["Keqing", "刻晴", "刻晴"],
+      "아를레키노": ["Arlecchino", "The Knave", "仆人", "召使"],
+      "클로린드": ["Clorinde", "克洛琳德", "クロリンデ"],
+      "나비아": ["Navia", "娜维娅", "ナヴィア"],
+      "에밀리": ["Emilie", "艾梅莉埃", "エミリエ"],
+      "마비카": ["Mavuika", "玛薇卡", "マーヴィカ"],
+      "실로닌": ["Xilonen", "希诺宁", "シロネン"]
+    },
+    "outfits": {
+      "수영복": ["Swimsuit", "Bikini", "水着", "泳装"],
+      "교복": ["School Uniform", "制服", "校服"],
+      "드레스": ["Dress", "ドレス", "礼服"],
+      "기본 스킨": ["Default Outfit", "Original Costume"]
+    }
+  },
+  "starrail": {
+    "name": "붕괴: 스타레일",
+    "aliases": ["Honkai Star Rail", "Honkai: Star Rail", "HSR", "崩坏：星穹铁道", "崩壊：スターレイル"],
+    "characters": {
+      "카프카": ["Kafka", "卡芙卡", "カフカ"],
+      "경류": ["Jingliu", "镜流", "鏡流"],
+      "은랑": ["Silver Wolf", "SW", "银狼", "銀狼"],
+      "아케론": ["Acheron", "黄泉", "黄泉"],
+      "반디": ["Firefly", "流萤", "ホタル"],
+      "블랙 스완": ["Black Swan", "黑天鹅", "ブラックスワン"],
+      "토파즈": ["Topaz", "托帕", "トパーズ"],
+      "스파클": ["Sparkle", "花火", "花火"],
+      "로빈": ["Robin", "知更鸟", "ロビン"],
+      "부트힐": ["Boothill", "波提欧", "ブートヒル"]
+    },
+    "outfits": {
+      "수영복": ["Swimsuit", "Bikini", "水着", "泳装"],
+      "드레스": ["Dress", "ドレス", "礼服"],
+      "교복": ["School Uniform", "制服", "校服"]
+    }
+  },
+  "zzz": {
+    "name": "젠레스 존 제로",
+    "aliases": ["Zenless Zone Zero", "ZZZ", "绝区零", "ゼンレスゾーンゼロ"],
+    "characters": {
+      "엘렌": ["Ellen", "Ellen Joe", "艾莲", "エレン"],
+      "니콜": ["Nicole", "Nicole Demara", "妮可", "ニコ"],
+      "주연": ["Zhu Yuan", "朱鸢", "朱鳶"],
+      "청의": ["Qingyi", "青衣", "チンイー"],
+      "제인": ["Jane Doe", "Jane", "简", "ジェーン"],
+      "그레이스": ["Grace", "Grace Howard", "格莉丝", "グレース"],
+      "버니스": ["Burnice", "柏妮思", "バーニス"],
+      "야나기": ["Yanagi", "柳", "柳"],
+      "미야비": ["Miyabi", "星见雅", "星見雅"],
+      "아스트라": ["Astra Yao", "Astra", "耀嘉音", "アストラ"]
+    },
+    "outfits": {
+      "수영복": ["Swimsuit", "Bikini", "水着", "泳装"],
+      "드레스": ["Dress", "ドレス", "礼服"],
+      "교복": ["School Uniform", "制服", "校服"]
+    }
+  }
+}
