@@ -102,11 +102,43 @@ class ApiTests(unittest.TestCase):
         ]).encode())
         posts = PawchiveClient().creator_posts("fanbox", "1234", offset=50)
         self.assertEqual(posts[0].post_id, "88")
-        self.assertIn("/fanbox/user/1234/posts?o=50", mock_urlopen.call_args.args[0].full_url)
+        self.assertIn("/fanbox/user/1234?o=50", mock_urlopen.call_args.args[0].full_url)
 
     def test_invalid_offset_rejected(self):
         with self.assertRaises(ValueError):
             PawchiveClient().creator_posts("fanbox", "1234", offset=1)
+
+    def test_all_creator_posts_fetches_past_three_pages(self):
+        calls = []
+        def page(_service, _creator_id, offset=0, query=None):
+            calls.append(offset)
+            count = 50 if offset < 100 else 17
+            return [
+                Post(service="fanbox", creator_id="1234", post_id=str(offset + index))
+                for index in range(count)
+            ]
+
+        with patch.object(PawchiveClient, "creator_posts", side_effect=page):
+            posts = PawchiveClient().all_creator_posts("fanbox", "1234")
+
+        self.assertEqual(calls, [0, 50, 100])
+        self.assertEqual(len(posts), 117)
+
+    def test_all_recent_posts_fetches_until_a_short_page(self):
+        calls = []
+        def page(query=None, offset=0):
+            calls.append(offset)
+            count = 50 if offset < 150 else 9
+            return [
+                Post(service="fanbox", creator_id="creator", post_id=str(offset + index))
+                for index in range(count)
+            ]
+
+        with patch.object(PawchiveClient, "recent_posts", side_effect=page):
+            posts = PawchiveClient().all_recent_posts()
+
+        self.assertEqual(calls, [0, 50, 100, 150])
+        self.assertEqual(len(posts), 159)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -127,6 +159,22 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(feed[0]["creator_name"], "Alice")
             repo.unfollow("fanbox", "1234")
             self.assertEqual(repo.following_feed(), [])
+
+    def test_following_and_creator_queries_return_all_pages_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalRepository(Path(tmp) / "data.sqlite3")
+            repo.save_creator(Creator(service="fanbox", creator_id="1234", name="Alice"))
+            repo.follow("fanbox", "1234")
+            posts = [
+                Post(service="fanbox", creator_id="1234", post_id=str(index),
+                     title=f"Post {index}", published=f"2026-01-{index % 28 + 1:02d}")
+                for index in range(175)
+            ]
+            repo.save_posts(posts)
+
+            self.assertEqual(len(repo.following_feed()), 175)
+            self.assertEqual(len(repo.posts_for_creator("fanbox", "1234")), 175)
+            self.assertEqual(len(repo.following_feed(limit=25)), 25)
 
     def test_follow_unknown_creator_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
