@@ -120,5 +120,43 @@ class DesktopSmokeTests(unittest.TestCase):
         browser.close()
 
 
+    def test_post_browser_appends_next_page_without_resetting_local_search(self):
+        first = Post.from_api({
+            "id": "page-1",
+            "service": "fanbox",
+            "user": "creator-1",
+            "title": "첫 번째 페이지 게시물",
+            "file": {"name": "first.zip", "path": "/data/aa/first.zip"},
+        })
+        second = Post.from_api({
+            "id": "page-2",
+            "service": "fanbox",
+            "user": "creator-1",
+            "title": "두 번째 페이지 게시물",
+            "file": {"name": "second.zip", "path": "/data/bb/second.zip"},
+        })
+        browser = ui.PostBrowser()
+        with patch.object(ui.PostBrowser, "_thumbnail_url_for_post", return_value=""):
+            browser.set_posts([first])
+            browser.set_pagination(True)
+            self.assertFalse(browser.load_more_button.isHidden())
+            browser.search_input.setText("두 번째")
+            browser.append_posts([second, second])
+
+        self.assertEqual(len(browser.posts), 2)
+        self.assertEqual(browser.search_input.text(), "두 번째")
+        self.assertTrue(browser.items.item(0).isHidden())
+        self.assertFalse(browser.items.item(1).isHidden())
+
+        requested = []
+        browser.load_more_requested.connect(lambda: requested.append(True))
+        browser.load_more_button.click()
+        self.assertEqual(requested, [True])
+
+        browser.set_pagination(False)
+        self.assertTrue(browser.load_more_button.isHidden())
+        browser.close()
+
+
 if __name__ == "__main__":
     unittest.main()
