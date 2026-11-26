@@ -473,7 +473,8 @@ def _enhanced_download_attachment(self, post: Post, attachment: Attachment) -> N
         self.status.setText("다운로드 완료")
         QMessageBox.information(self, "다운로드 완료", message)
 
-    self._run_task(f"{filename} 다운로드 중…", task, done)
+    runner = getattr(self, "_run_download_task", self._run_task)
+    runner(f"{filename} 다운로드 중…", task, done)
 
 
 def install_ui_enhancements(ui_module) -> None:
