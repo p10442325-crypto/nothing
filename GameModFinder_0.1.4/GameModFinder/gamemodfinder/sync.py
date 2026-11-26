@@ -49,8 +49,10 @@ def sync_creator(
     boundary_found = False
     page_limit = max(1, min(int(max_pages), 100))
 
+    pages_checked = 0
     for page in range(page_limit):
         offset = page * 50
+        pages_checked = page + 1
         if progress:
             progress(f"{service}/{user_id} 게시물 동기화 · {offset + 1}번부터 확인")
         raw_posts = api.get_creator_posts(service, user_id, offset=offset)
@@ -93,7 +95,7 @@ def sync_creator(
         "user_id": user_id,
         "new_posts": len(analyzed),
         "latest_post_id": latest_id or last_seen,
-        "pages_checked": min(page_limit, (offset // 50 + 1) if raw_posts else page_limit),
+        "pages_checked": pages_checked,
         "reached_previous_post": boundary_found,
         "results": analyzed,
     }
