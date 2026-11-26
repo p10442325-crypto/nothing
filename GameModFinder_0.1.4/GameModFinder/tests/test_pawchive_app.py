@@ -11,7 +11,7 @@ from urllib.error import URLError
 from unittest.mock import patch
 
 from pawchive_app.api import PawchiveClient
-from pawchive_app.downloads import DownloadError, resolve_file_url, safe_extract_zip, safe_extract_archive
+from pawchive_app.downloads import DownloadError, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive
 from pawchive_app.models import Creator, Post, parse_creator_url
 from pawchive_app.repository import LocalRepository
 
@@ -140,6 +140,24 @@ class DownloadSafetyTests(unittest.TestCase):
             resolve_file_url("https://evil.example/data/example.zip")
         with self.assertRaises(DownloadError):
             resolve_file_url("/profile/example.zip")
+
+    def test_thumbnail_url_uses_pawchive_thumbnail_host(self):
+        self.assertEqual(
+            resolve_thumbnail_url("/data/ab/example.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg",
+        )
+        self.assertEqual(
+            resolve_thumbnail_url("https://file.pawchive.pw/data/ab/example.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg",
+        )
+        self.assertEqual(
+            resolve_thumbnail_url("https://img.pawchive.pw/thumbnail/data/ab/example.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg",
+        )
+        with self.assertRaises(DownloadError):
+            resolve_thumbnail_url("https://evil.example/data/image.png")
+        with self.assertRaises(DownloadError):
+            resolve_thumbnail_url("/data/../secret.jpg")
 
     def test_zip_extracts_inside_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
