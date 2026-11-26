@@ -102,6 +102,7 @@ class TaskThread(QThread):
 
 class PostBrowser(QWidget):
     download_requested = Signal(object, object)
+    load_more_requested = Signal()
 
     ARCHIVE_SUFFIXES = {
         ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
@@ -165,6 +166,11 @@ class PostBrowser(QWidget):
         self.list_content.addWidget(self.items)
         self.list_content.addWidget(self.list_empty)
         list_layout.addWidget(self.list_content, 1)
+        self.load_more_button = QPushButton("다음 페이지 불러오기", self.list_page)
+        self.load_more_button.setObjectName("Primary")
+        self.load_more_button.clicked.connect(self.load_more_requested.emit)
+        self.load_more_button.hide()
+        list_layout.addWidget(self.load_more_button)
         self.stack.addWidget(self.list_page)
 
         self.detail_page = QWidget()
@@ -302,28 +308,46 @@ class PostBrowser(QWidget):
             setter(self.session_cookie)
 
     def set_posts(self, posts: list[Post]) -> None:
+        """Replace the current feed and reset any in-progress thumbnail work."""
         self._thumbnail_generation += 1
-        generation = self._thumbnail_generation
         self._thumbnail_queue.clear()
         self._thumbnail_pending.clear()
         self._thumbnail_loaded.clear()
         self._thumbnail_failed_urls.clear()
         self._thumbnail_items.clear()
 
-        posts = [
-            post for post in posts
-            if any(
-                self._is_archive(attachment.name) or self._is_archive(attachment.path)
-                for attachment in post.files
-            )
-        ]
-        self.posts = posts
+        self.posts = []
         self.items.clear()
         self.current_post = None
         self.search_input.clear()
         self.stack.setCurrentWidget(self.list_page)
+        self.set_pagination(False)
 
+        self.append_posts(posts)
+        self.title.setText("게시물을 선택하세요")
+        self.meta.clear()
+        self.content.clear()
+        self._clear_attachment_cards()
+        self.open_button.setEnabled(False)
+
+    def append_posts(self, posts: list[Post]) -> None:
+        """Append one API page without clearing the current search or loaded cards."""
+        existing = {
+            (post.service, post.creator_id, post.post_id)
+            for post in self.posts
+        }
         for post in posts:
+            if not any(
+                self._is_archive(attachment.name) or self._is_archive(attachment.path)
+                for attachment in post.files
+            ):
+                continue
+            key = (post.service, post.creator_id, post.post_id)
+            if key in existing:
+                continue
+            existing.add(key)
+            self.posts.append(post)
+
             item = QListWidgetItem(post.title or "(제목 없음)")
             item.setData(Qt.UserRole, post)
             item.setTextAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
@@ -337,14 +361,17 @@ class PostBrowser(QWidget):
                 self._thumbnail_items.setdefault(thumb_url, []).append(item)
             self.items.addItem(item)
 
-        self.filter_posts("")
-        self.title.setText("게시물을 선택하세요")
-        self.meta.clear()
-        self.content.clear()
-        self._clear_attachment_cards()
-        self.open_button.setEnabled(False)
-        self._pending_layout_generation = generation
+        self.filter_posts(self.search_input.text())
+        self._pending_layout_generation = self._thumbnail_generation
         self._layout_refresh_timer.start(0)
+
+    def set_pagination(self, has_more: bool, loading: bool = False) -> None:
+        """Show a single explicit next-page action for paginated feeds."""
+        self.load_more_button.setVisible(bool(has_more or loading))
+        self.load_more_button.setEnabled(bool(has_more) and not loading)
+        self.load_more_button.setText(
+            "다음 페이지 불러오는 중…" if loading else "다음 페이지 불러오기"
+        )
 
     def filter_posts(self, query: str = "") -> None:
         """Filter the loaded archive-post list without discarding cached posts."""
@@ -682,6 +709,10 @@ class MainWindow(QMainWindow):
         self._creator_tag_owner: tuple[str, str] | None = None
         self._creator_tag_request: tuple[str, str] | None = None
         self._creator_tag_workers: set[TaskThread] = set()
+        self._explore_query_active = ""
+        self._explore_next_offset = 0
+        self._explore_has_more = False
+        self._explore_loading = False
         self._build_ui()
         for browser in (self.following_browser, self.creator_browser, self.explore_browser):
             browser.set_session_cookie(self.settings.get("session_key") or None)
@@ -803,6 +834,7 @@ class MainWindow(QMainWindow):
         explore_layout.addLayout(explore_top)
         self.explore_browser = PostBrowser()
         self.explore_browser.download_requested.connect(self.download_attachment)
+        self.explore_browser.load_more_requested.connect(self.load_more_explore_posts)
         explore_layout.addWidget(self.explore_browser, 1)
         self.tabs.addTab(explore_page, "전체 탐색")
 
@@ -831,7 +863,8 @@ class MainWindow(QMainWindow):
         self.sync_label.setText(f"자동 동기화 {minutes}분")
 
     def _run_task(self, label: str, task: Callable[[], object],
-                  on_success: Callable[[object], None]) -> None:
+                  on_success: Callable[[object], None],
+                  on_failure: Callable[[str], None] | None = None) -> None:
         if any(worker.isRunning() for worker in self.workers):
             QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 시도해 주세요.")
             return
@@ -839,7 +872,7 @@ class MainWindow(QMainWindow):
         worker = TaskThread(task)
         self.workers.add(worker)
         worker.succeeded.connect(on_success)
-        worker.failed.connect(self._task_failed)
+        worker.failed.connect(on_failure or self._task_failed)
         worker.finished.connect(lambda w=worker: self.workers.discard(w))
         worker.start()
 
@@ -1090,18 +1123,80 @@ class MainWindow(QMainWindow):
         if query and len(query) < 3:
             QMessageBox.information(self, "검색어 길이", "검색어는 3글자 이상 입력하세요.")
             return
+        if any(worker.isRunning() for worker in self.workers):
+            QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 검색해 주세요.")
+            return
+
+        self._explore_query_active = query
+        self._explore_next_offset = 0
+        self._explore_has_more = False
+        self._explore_loading = True
+        self.explore_browser.set_posts([])
+        self.explore_browser.list_empty.setText("첫 페이지를 불러오는 중입니다.")
+        self.explore_browser.set_pagination(False, loading=True)
 
         def task():
             with self._client() as client:
-                posts = client.all_recent_posts(query or None)
+                posts = client.recent_posts(query or None, offset=0)
             self.database.save_posts(posts)
             return posts
 
-        def done(posts):
-            self.explore_browser.set_posts(posts)
-            self.status.setText(f"전체 탐색 결과 {len(posts)}개")
+        def failed(message: str) -> None:
+            self._explore_loading = False
+            self.explore_browser.set_pagination(False)
+            self.explore_browser.list_empty.setText("게시물을 불러오지 못했습니다.")
+            self.status.setText("전체 탐색 실패")
+            QMessageBox.warning(self, "전체 탐색 실패", message)
 
-        self._run_task("Pawchive 전체 게시물 검색 중…", task, done)
+        def done(posts):
+            self._explore_loading = False
+            self.explore_browser.set_posts(posts)
+            self._explore_next_offset = 50
+            self._explore_has_more = len(posts) >= 50
+            self.explore_browser.set_pagination(self._explore_has_more)
+            self.status.setText(
+                f"전체 탐색 1페이지 · 압축파일 게시물 {len(self.explore_browser.posts):,}개"
+            )
+
+        self._run_task("Pawchive 전체 게시물 첫 페이지 검색 중…", task, done, failed)
+
+    def load_more_explore_posts(self) -> None:
+        if self._explore_loading or not self._explore_has_more:
+            return
+        if any(worker.isRunning() for worker in self.workers):
+            QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 시도해 주세요.")
+            return
+
+        query = self._explore_query_active
+        offset = self._explore_next_offset
+        page_number = offset // 50 + 1
+        self._explore_loading = True
+        self.explore_browser.set_pagination(self._explore_has_more, loading=True)
+
+        def task():
+            with self._client() as client:
+                posts = client.recent_posts(query or None, offset=offset)
+            self.database.save_posts(posts)
+            return posts
+
+        def failed(message: str) -> None:
+            self._explore_loading = False
+            self.explore_browser.set_pagination(self._explore_has_more)
+            self.status.setText("전체 탐색 페이지 불러오기 실패")
+            QMessageBox.warning(self, "전체 탐색 실패", message)
+
+        def done(posts):
+            self._explore_loading = False
+            self.explore_browser.append_posts(posts)
+            self._explore_next_offset = offset + 50
+            self._explore_has_more = len(posts) >= 50
+            self.explore_browser.set_pagination(self._explore_has_more)
+            self.status.setText(
+                f"전체 탐색 {page_number}페이지 · 누적 압축파일 게시물 "
+                f"{len(self.explore_browser.posts):,}개"
+            )
+
+        self._run_task(f"Pawchive 전체 탐색 {page_number}페이지 불러오는 중…", task, done, failed)
 
     def download_attachment(self, post: Post, attachment: Attachment) -> None:
         paths = {"공통 저장 폴더": self.settings.get("download_dir", "")}
