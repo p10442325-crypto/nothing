@@ -242,6 +242,37 @@ class DownloadSafetyTests(unittest.TestCase):
         self.assertTrue(any(str(item).startswith("User-Agent: PawchiveModFinder/") for item in command))
         self.assertIn("-f", command)
 
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads.shutil.which", return_value="curl.exe")
+    def test_curl_376_byte_antibot_placeholder_is_not_saved(self, _mock_which, mock_run):
+        def fake_run(command, **_kwargs):
+            header_path = Path(command[command.index("-D") + 1])
+            output_path = Path(command[command.index("-o") + 1])
+            header_path.write_text(
+                "HTTP/1.1 200 OK\r\nContent-Length: 376\r\n",
+                encoding="ascii",
+            )
+            output_path.write_bytes(b"x" * 376)
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "blocked.bin"
+            from pawchive_app.downloads import _curl_transfer
+            with self.assertRaisesRegex(DownloadError, "376바이트"):
+                _curl_transfer(
+                    "https://file.pawchive.pw/data/ab/blocked.bin?f=blocked.bin",
+                    target,
+                    60,
+                    resume=False,
+                )
+            self.assertFalse(target.exists())
+
     def test_zip_extracts_inside_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "safe.zip"
