@@ -379,8 +379,8 @@ class PostBrowser(QWidget):
                     self._thumbnail_failed_for_card(image_url, message, gen)
             )
             worker.finished.connect(
-                lambda item=worker, image_url=url:
-                    self._thumbnail_worker_finished(item, image_url)
+                lambda item=worker, image_url=url, gen=generation:
+                    self._thumbnail_worker_finished(item, image_url, gen)
             )
             worker.start()
 
@@ -411,10 +411,11 @@ class PostBrowser(QWidget):
         for item in self._thumbnail_items.get(url, []):
             item.setToolTip(item.toolTip() + "\n미리보기를 불러오지 못했습니다: " + message)
 
-    def _thumbnail_worker_finished(self, worker: TaskThread, url: str) -> None:
+    def _thumbnail_worker_finished(self, worker: TaskThread, url: str, generation: int) -> None:
         self._thumbnail_workers.discard(worker)
         self._thumbnail_worker_urls.pop(worker, None)
-        self._thumbnail_pending.discard(url)
+        if generation == self._thumbnail_generation:
+            self._thumbnail_pending.discard(url)
         worker.deleteLater()
         self._pump_thumbnail_queue()
 
