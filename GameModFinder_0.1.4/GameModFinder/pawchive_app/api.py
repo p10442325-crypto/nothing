@@ -293,9 +293,14 @@ class PawchiveClient:
         offset = 0
         pages = 0
         while max_pages is None or pages < max_pages:
-            page = self.creator_posts(
-                service, creator_id, offset=offset, query=query, tag=tag
-            )
+            if tag:
+                page = self.creator_posts(
+                    service, creator_id, offset=offset, query=query, tag=tag
+                )
+            else:
+                page = self.creator_posts(
+                    service, creator_id, offset=offset, query=query
+                )
             result.extend(page)
             pages += 1
             if len(page) < 50:
