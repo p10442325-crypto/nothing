@@ -156,30 +156,41 @@ class LocalRepository:
         return count
 
     def posts_for_creator(
-        self, service: str, creator_id: str, limit: int = 100, offset: int = 0
+        self, service: str, creator_id: str, limit: int | None = None, offset: int = 0
     ) -> list[dict]:
+        query = """
+            SELECT * FROM posts WHERE service=? AND creator_id=?
+            ORDER BY published DESC, added DESC
+        """
+        params: list[object] = [service, creator_id]
+        if limit is None:
+            if offset:
+                query += " LIMIT -1 OFFSET ?"
+                params.append(max(0, offset))
+        else:
+            query += " LIMIT ? OFFSET ?"
+            params.extend((max(1, limit), max(0, offset)))
         with self._connect() as db:
-            rows = db.execute(
-                """
-                SELECT * FROM posts WHERE service=? AND creator_id=?
-                ORDER BY published DESC, added DESC LIMIT ? OFFSET ?
-                """,
-                (service, creator_id, max(1, limit), max(0, offset)),
-            ).fetchall()
+            rows = db.execute(query, params).fetchall()
             return [dict(row) for row in rows]
 
-    def following_feed(self, limit: int = 100, offset: int = 0) -> list[dict]:
+    def following_feed(self, limit: int | None = None, offset: int = 0) -> list[dict]:
+        query = """
+            SELECT p.*, c.name AS creator_name FROM posts p
+            JOIN creators c USING(service, creator_id)
+            WHERE c.followed=1
+            ORDER BY p.published DESC, p.added DESC
+        """
+        params: list[object] = []
+        if limit is None:
+            if offset:
+                query += " LIMIT -1 OFFSET ?"
+                params.append(max(0, offset))
+        else:
+            query += " LIMIT ? OFFSET ?"
+            params.extend((max(1, limit), max(0, offset)))
         with self._connect() as db:
-            rows = db.execute(
-                """
-                SELECT p.*, c.name AS creator_name FROM posts p
-                JOIN creators c USING(service, creator_id)
-                WHERE c.followed=1
-                ORDER BY p.published DESC, p.added DESC
-                LIMIT ? OFFSET ?
-                """,
-                (max(1, limit), max(0, offset)),
-            ).fetchall()
+            rows = db.execute(query, params).fetchall()
             return [dict(row) for row in rows]
 
     def update_sync_state(
