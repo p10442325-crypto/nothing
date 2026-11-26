@@ -208,6 +208,10 @@ class SettingsPage(QWidget):
         self.sync_interval.setSuffix("분")
         self.sync_interval.setValue(int(settings.get("sync_minutes", 60)))
         form.addRow("자동 동기화 간격", self.sync_interval)
+        self.session_key = QLineEdit(settings.get("session_key", ""))
+        self.session_key.setEchoMode(QLineEdit.Password)
+        self.session_key.setPlaceholderText("선택 사항 · 403 응답을 받는 파일에만 사용")
+        form.addRow("파일 서버 세션 키", self.session_key)
         layout.addLayout(form)
 
         layout.addWidget(QLabel("게임별 저장 폴더"))
@@ -267,6 +271,7 @@ class SettingsPage(QWidget):
     def _save(self) -> None:
         self.settings["download_dir"] = self.common_path.text().strip()
         self.settings["sync_minutes"] = self.sync_interval.value()
+        self.settings["session_key"] = self.session_key.text().strip()
         save_settings(self.settings)
         self.changed.emit()
         QMessageBox.information(self, "저장 완료", "설정을 저장했습니다.")
@@ -423,6 +428,9 @@ class MainWindow(QMainWindow):
 
     def _run_task(self, label: str, task: Callable[[], object],
                   on_success: Callable[[object], None]) -> None:
+        if any(worker.isRunning() for worker in self.workers):
+            QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 시도해 주세요.")
+            return
         self.status.setText(label)
         worker = TaskThread(task)
         self.workers.add(worker)
@@ -622,7 +630,10 @@ class MainWindow(QMainWindow):
         folder.mkdir(parents=True, exist_ok=True)
 
         def task():
-            saved = download_file(attachment.path, target)
+            saved = download_file(
+                attachment.path, target,
+                session_cookie=self.settings.get("session_key") or None,
+            )
             extracted = []
             try:
                 extracted = safe_extract_archive(saved, saved.parent / (saved.stem + "_extracted"))
