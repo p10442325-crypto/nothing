@@ -20,6 +20,11 @@ class DesktopSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        cls.image_queue_patch = patch(
+            "pawchive_app.enhancements.PostTextBrowser._pump_image_queue"
+        )
+        cls.image_queue_patch.start()
+        cls.addClassCleanup(cls.image_queue_patch.stop)
 
     def test_main_window_exposes_expected_navigation(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
