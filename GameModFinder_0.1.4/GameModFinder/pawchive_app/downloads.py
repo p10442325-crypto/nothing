@@ -93,6 +93,58 @@ def resolve_file_url(path_or_url: str, filename: str | None = None) -> str:
     return f"https://{FILES_HOST}{encoded_path}" + (f"?{query_string}" if query_string else "")
 
 
+
+def resolve_thumbnail_url(path_or_url: str) -> str:
+    """Build a Pawchive thumbnail URL from a supported attachment path.
+
+    Pawchive serves previews from img.pawchive.pw/thumbnail/data/... .
+    Original file URLs are never rewritten to another host unless they use
+    Pawchive's dedicated file host and /data/ path.
+    """
+    value = (path_or_url or "").strip()
+    if not value:
+        raise DownloadError("이미지 경로가 비어 있습니다.")
+
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() != "https" or parsed.username or parsed.password:
+            raise DownloadError("지원하지 않는 Pawchive 이미지 주소입니다.")
+        path = unquote(parsed.path).replace("\\\\", "/")
+        if host == "img.pawchive.pw":
+            if not path.startswith("/thumbnail/data/"):
+                raise DownloadError("지원하지 않는 Pawchive 썸네일 경로입니다.")
+            return f"https://img.pawchive.pw{quote(path, safe='/:@!
+def download_file(
+'()*+,;=-._~')}"
+        if host == FILES_HOST:
+            if not path.startswith("/data/"):
+                raise DownloadError("원본 파일 서버의 이미지 경로가 올바르지 않습니다.")
+        else:
+            raise DownloadError("허용되지 않은 Pawchive 이미지 서버입니다.")
+    else:
+        if parsed.netloc:
+            raise DownloadError("이미지 경로 형식이 올바르지 않습니다.")
+        path = unquote(parsed.path).replace("\\\\", "/")
+
+    if "\\x00" in path or any(part in {".", ".."} for part in path.split("/")):
+        raise DownloadError("안전하지 않은 Pawchive 이미지 경로입니다.")
+    normalized = "/" + path.lstrip("/")
+    if normalized.startswith("/thumbnail/data/"):
+        thumb_path = normalized
+    elif normalized.startswith("/data/"):
+        thumb_path = "/thumbnail" + normalized
+    else:
+        if normalized.startswith("/f/") or normalized == "/f":
+            raise DownloadError("이 파일 형식은 썸네일 미리보기를 지원하지 않습니다.")
+        if len([part for part in normalized.split("/") if part]) < 2:
+            raise DownloadError("Pawchive 이미지 경로 형식이 올바르지 않습니다.")
+        thumb_path = "/thumbnail/data" + normalized
+    return "https://img.pawchive.pw" + quote(thumb_path, safe="/:@!
+def download_file(
+'()*+,;=-._~")
+
+
 def download_file(
     path_or_url: str,
     destination: str | Path,
