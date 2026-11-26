@@ -11,7 +11,7 @@ from urllib.error import URLError
 from unittest.mock import patch
 
 from pawchive_app.api import PawchiveClient
-from pawchive_app.downloads import DownloadError, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive
+from pawchive_app.downloads import DownloadError, download_file, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive
 from pawchive_app.models import Creator, Post, parse_creator_url
 from pawchive_app.repository import LocalRepository
 
@@ -136,6 +136,10 @@ class DownloadSafetyTests(unittest.TestCase):
             resolve_file_url("/data/ab/example.zip"),
             "https://file.pawchive.pw/data/ab/example.zip",
         )
+        self.assertEqual(
+            resolve_file_url("/data/ab/example.zip", filename="example.zip"),
+            "https://file.pawchive.pw/data/ab/example.zip?f=example.zip",
+        )
         with self.assertRaises(DownloadError):
             resolve_file_url("https://evil.example/data/example.zip")
         with self.assertRaises(DownloadError):
@@ -158,6 +162,36 @@ class DownloadSafetyTests(unittest.TestCase):
             resolve_thumbnail_url("https://evil.example/data/image.png")
         with self.assertRaises(DownloadError):
             resolve_thumbnail_url("/data/../secret.jpg")
+
+    def test_thumbnail_url_includes_original_filename(self):
+        self.assertEqual(
+            resolve_thumbnail_url("/data/ab/image.jpg", filename="original name.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/image.jpg?f=original+name.jpg",
+        )
+
+    @patch("pawchive_app.downloads._browser_download")
+    @patch("pawchive_app.downloads.shutil.which", return_value=None)
+    @patch(
+        "pawchive_app.downloads.urlopen",
+        side_effect=URLError(ConnectionResetError(10054, "connection reset")),
+    )
+    def test_file_download_uses_browser_fallback_and_filename(
+        self, _mock_urlopen, _mock_which, mock_browser
+    ):
+        def save_test_payload(url, destination, timeout, session_cookie=None):
+            Path(destination).write_bytes(b"pawchive-test")
+
+        mock_browser.side_effect = save_test_payload
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "original.bin"
+            saved = download_file(
+                "/data/ab/original.bin",
+                target,
+                filename="original.bin",
+            )
+            self.assertEqual(saved.read_bytes(), b"pawchive-test")
+            request_url = mock_browser.call_args.args[0]
+            self.assertIn("?f=original.bin", request_url)
 
     def test_zip_extracts_inside_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
