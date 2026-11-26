@@ -38,15 +38,22 @@ class DesktopSmokeTests(unittest.TestCase):
             "user": "creator-1",
             "title": "제목만 보이는 게시물",
             "content": "본문 전체 내용",
+            "file": {"name": "sample-mod.zip", "path": "/data/ab/sample-mod.zip"},
+            "attachments": [{"name": "preview.jpg", "path": "/data/cd/preview.jpg"}],
         })
         browser.set_posts([post])
 
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
         self.assertEqual(browser.items.item(0).text(), "제목만 보이는 게시물")
+        self.assertEqual(browser.items.viewMode(), ui.QListView.IconMode)
+        self.assertEqual(browser.items.iconSize().width(), 176)
 
         browser.items.itemClicked.emit(browser.items.item(0))
         self.assertEqual(browser.stack.currentWidget(), browser.detail_page)
         self.assertEqual(browser.title.text(), "제목만 보이는 게시물")
+        self.assertEqual(len(browser.attachment_buttons), 2)
+        self.assertTrue(all(button.text() == "다운로드" for button in browser.attachment_buttons))
+        self.assertFalse(hasattr(browser, "files"))
 
         browser.back_button.click()
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
