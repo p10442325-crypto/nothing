@@ -339,6 +339,8 @@ class PostTextBrowser(QTextBrowser):
         self.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
         self._image_cache: dict[str, QImage] = {}
         self._pending: dict[str, _ThumbnailFetchThread] = {}
+        self._queued: list[str] = []
+        self.max_active_image_fetches = 3
         self.session_cookie = ""
         self._image_failures: set[str] = set()
 
@@ -362,22 +364,35 @@ class PostTextBrowser(QTextBrowser):
                 cached = self._image_cache.get(key)
                 if cached is not None:
                     return cached
-                if key not in self._pending and key not in self._image_failures:
-                    worker = _ThumbnailFetchThread(key, self.session_cookie or None)
-                    self._pending[key] = worker
-                    worker.loaded.connect(self._image_loaded)
-                    worker.failed.connect(self._image_failed)
-                    worker.finished.connect(
-                        lambda image_url=key, item=worker: self._worker_finished(image_url, item)
-                    )
-                    worker.finished.connect(worker.deleteLater)
-                    worker.start()
+                if (
+                    key not in self._pending
+                    and key not in self._queued
+                    and key not in self._image_failures
+                ):
+                    self._queued.append(key)
+                    self._pump_image_queue()
                 return QImage()
         return super().loadResource(resource_type, name)
+
+    def _pump_image_queue(self) -> None:
+        while self._queued and len(self._pending) < self.max_active_image_fetches:
+            key = self._queued.pop(0)
+            if key in self._image_cache or key in self._image_failures or key in self._pending:
+                continue
+            worker = _ThumbnailFetchThread(key, self.session_cookie or None)
+            self._pending[key] = worker
+            worker.loaded.connect(self._image_loaded)
+            worker.failed.connect(self._image_failed)
+            worker.finished.connect(
+                lambda image_url=key, item=worker: self._worker_finished(image_url, item)
+            )
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
 
     def _worker_finished(self, key: str, worker: _ThumbnailFetchThread) -> None:
         if self._pending.get(key) is worker:
             self._pending.pop(key, None)
+        self._pump_image_queue()
 
     def _image_loaded(self, key: str, payload: bytes) -> None:
         image = QImage.fromData(payload)
