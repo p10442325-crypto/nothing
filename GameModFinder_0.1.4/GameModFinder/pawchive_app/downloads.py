@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import shutil
 import subprocess
 import threading
@@ -11,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from concurrent.futures import Future
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
@@ -25,6 +27,8 @@ _THUMB_CACHE_LOCK = threading.Lock()
 _THUMB_CACHE: OrderedDict[str, bytes] = OrderedDict()
 _THUMB_CACHE_SIZE = 0
 _THUMB_CACHE_LIMIT = 48 * 1024 * 1024
+_THUMB_DISK_CACHE_LIMIT = 256 * 1024 * 1024
+_THUMB_INFLIGHT: dict[str, Future[bytes]] = {}
 
 
 def _wait_download_slot() -> None:
@@ -467,11 +471,57 @@ def _curl_transfer(
         header_path.unlink(missing_ok=True)
 
 
+def _thumbnail_cache_key(url: str, session_cookie: str | None) -> str:
+    # Hash the optional session key into the cache key without ever persisting it.
+    raw = url + "\\0" + (session_cookie or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _thumbnail_cache_path(cache_key: str) -> Path:
+    root = Path(
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or (Path.home() / ".cache")
+    )
+    return root / "PawchiveModFinder" / "thumbnails" / cache_key[:2] / (cache_key + ".bin")
+
+
+def _remember_thumbnail(cache_key: str, payload: bytes) -> None:
+    global _THUMB_CACHE_SIZE
+    with _THUMB_CACHE_LOCK:
+        previous = _THUMB_CACHE.pop(cache_key, None)
+        if previous is not None:
+            _THUMB_CACHE_SIZE -= len(previous)
+        _THUMB_CACHE[cache_key] = payload
+        _THUMB_CACHE_SIZE += len(payload)
+        while _THUMB_CACHE_SIZE > _THUMB_CACHE_LIMIT and _THUMB_CACHE:
+            _, removed = _THUMB_CACHE.popitem(last=False)
+            _THUMB_CACHE_SIZE -= len(removed)
+
+
+def _trim_thumbnail_disk_cache(directory: Path) -> None:
+    try:
+        files = list(directory.glob("*/*.bin"))
+        total = sum(item.stat().st_size for item in files if item.is_file())
+        if total <= _THUMB_DISK_CACHE_LIMIT:
+            return
+        for item in sorted(files, key=lambda value: value.stat().st_mtime):
+            try:
+                size = item.stat().st_size
+                item.unlink(missing_ok=True)
+                total -= size
+                if total <= _THUMB_DISK_CACHE_LIMIT:
+                    break
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def fetch_thumbnail_bytes(
     url: str, timeout: int = 30, session_cookie: str | None = None,
 ) -> bytes:
-    """Fetch a Pawchive thumbnail with the dedicated downloader transport."""
-    global _THUMB_CACHE_SIZE
+    """Fetch a Pawchive thumbnail using memory/disk caches and request de-duplication."""
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https"
@@ -480,29 +530,71 @@ def fetch_thumbnail_bytes(
     ):
         raise DownloadError("허용되지 않은 Pawchive 썸네일 주소입니다.")
 
+    cache_key = _thumbnail_cache_key(url, session_cookie)
     with _THUMB_CACHE_LOCK:
-        cached = _THUMB_CACHE.get(url)
+        cached = _THUMB_CACHE.get(cache_key)
         if cached is not None:
-            _THUMB_CACHE.move_to_end(url)
+            _THUMB_CACHE.move_to_end(cache_key)
             return cached
+        future = _THUMB_INFLIGHT.get(cache_key)
+        is_owner = future is None
+        if future is None:
+            future = Future()
+            _THUMB_INFLIGHT[cache_key] = future
 
-        with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
-            temporary = Path(directory) / "thumbnail.bin"
-            _curl_transfer(
-                url, temporary, timeout, session_cookie=session_cookie,
-                resume=False, attempts=3,
-            )
-            payload = temporary.read_bytes()
+    if not is_owner:
+        # Another visible card or the rich-text viewer is already fetching it.
+        return future.result(timeout=max(120, int(timeout) + 90))
 
-        if not payload or len(payload) > 16 * 1024 * 1024:
-            raise DownloadError("이미지 응답이 비어 있거나 너무 큽니다.")
+    try:
+        disk_path = _thumbnail_cache_path(cache_key)
+        payload = b""
+        try:
+            if disk_path.is_file():
+                size = disk_path.stat().st_size
+                if 0 < size <= 16 * 1024 * 1024:
+                    payload = disk_path.read_bytes()
+                else:
+                    disk_path.unlink(missing_ok=True)
+        except OSError:
+            payload = b""
 
-        _THUMB_CACHE[url] = payload
-        _THUMB_CACHE_SIZE += len(payload)
-        while _THUMB_CACHE_SIZE > _THUMB_CACHE_LIMIT and _THUMB_CACHE:
-            _, removed = _THUMB_CACHE.popitem(last=False)
-            _THUMB_CACHE_SIZE -= len(removed)
+        if not payload:
+            with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
+                temporary = Path(directory) / "thumbnail.bin"
+                _curl_transfer(
+                    url, temporary, timeout, session_cookie=session_cookie,
+                    resume=False, attempts=2,
+                )
+                payload = temporary.read_bytes()
+
+            if not payload or len(payload) > 16 * 1024 * 1024:
+                raise DownloadError("이미지 응답이 비어 있거나 너무 큽니다.")
+
+            # The cache is an optimization only; disk write failures must not
+            # turn a successful network response into a failed preview.
+            try:
+                disk_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary_cache = disk_path.with_name(disk_path.name + f".{os.getpid()}.tmp")
+                temporary_cache.write_bytes(payload)
+                os.replace(temporary_cache, disk_path)
+                _trim_thumbnail_disk_cache(disk_path.parent.parent)
+            except OSError:
+                try:
+                    temporary_cache.unlink(missing_ok=True)
+                except (OSError, UnboundLocalError):
+                    pass
+
+        _remember_thumbnail(cache_key, payload)
+        future.set_result(payload)
         return payload
+    except Exception as exc:
+        future.set_exception(exc)
+        raise
+    finally:
+        with _THUMB_CACHE_LOCK:
+            if _THUMB_INFLIGHT.get(cache_key) is future:
+                _THUMB_INFLIGHT.pop(cache_key, None)
 
 
 def download_file(
