@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog,
 )
 
-from .api import APP_USER_AGENT, PawchiveClient, PawchiveError
+from .api import PawchiveClient, PawchiveError
 from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url
 from .repository import LocalRepository
@@ -207,8 +207,15 @@ class PostBrowser(QWidget):
                 media_name = media.get("name") or media.get("filename")
                 for key in ("thumbnail", "thumbnail_url", "preview", "preview_url", "path", "url"):
                     value = media.get(key)
-                    if isinstance(value, str) and value.strip():
-                        candidates.append((value.strip(), str(media_name) if media_name else None))
+                    if not isinstance(value, str) or not value.strip():
+                        continue
+                    if key in {"path", "url"}:
+                        media_suffix = Path(str(media_name or value.split("?", 1)[0])).suffix.lower()
+                        if media_suffix not in {
+                            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"
+                        }:
+                            continue
+                    candidates.append((value.strip(), str(media_name) if media_name else None))
 
         for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
             value = post.raw.get(key)
