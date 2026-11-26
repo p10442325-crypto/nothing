@@ -335,7 +335,7 @@ class DownloadSafetyTests(unittest.TestCase):
             header_path = Path(command[command.index("-D") + 1])
             output_path = Path(command[command.index("-o") + 1])
             header_path.write_text(
-                "HTTP/1.1 200 OK\\r\\nContent-Length: 6\\r\\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n",
                 encoding="ascii",
             )
             output_path.write_bytes(b"abcdef")
