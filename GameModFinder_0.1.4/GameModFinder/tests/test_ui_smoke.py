@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -21,18 +22,22 @@ class DesktopSmokeTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_main_window_exposes_expected_navigation(self):
-        window = MainWindow()
-        self.assertEqual(
-            [window.tabs.tabText(i) for i in range(window.tabs.count())],
-            ["팔로잉", "크리에이터", "크리에이터 찾기", "전체 탐색", "다운로드", "설정"],
-        )
-        self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
-        self.assertTrue(hasattr(window.following_browser, "image_preview"))
-        self.assertTrue(hasattr(window.following_browser, "_thumbnail_workers"))
-        self.assertTrue(hasattr(window, "creator_tag_combo"))
-        self.assertEqual(window.creator_tag_combo.itemText(0), "전체 게시물")
-        self.assertIsNone(window.findChild(ui.QFrame, "Header"))
-        window.close()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {"APPDATA": temp_dir, "LOCALAPPDATA": temp_dir}
+        ):
+            window = MainWindow()
+            self.assertEqual(
+                [window.tabs.tabText(i) for i in range(window.tabs.count())],
+                ["팔로잉", "크리에이터", "크리에이터 찾기", "전체 탐색", "다운로드", "설정"],
+            )
+            self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
+            self.assertTrue(hasattr(window.following_browser, "image_preview"))
+            self.assertTrue(hasattr(window.following_browser, "_thumbnail_workers"))
+            self.assertTrue(hasattr(window, "creator_tag_combo"))
+            self.assertEqual(window.creator_tag_combo.itemText(0), "전체 게시물")
+            self.assertIsNone(window.findChild(ui.QFrame, "Header"))
+            window.close()
+            self.app.processEvents()
 
     def test_post_browser_opens_full_width_detail_and_returns_to_title_list(self):
         browser = ui.PostBrowser()
