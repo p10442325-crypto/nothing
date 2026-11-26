@@ -186,10 +186,11 @@ class FinderDatabase:
             WHERE service=? AND user_id=?
         """, (service, user_id)).fetchall()
         total = len(rows)
+        # Category is assigned before discovery relevance boosts are applied;
+        # using it avoids inflating the creator's mod ratio for keyword matches.
         mod_count = sum(
             1 for row in rows
-            if int(row["score"] or 0) >= 50
-            or row["category"] in ("게임 모드", "모드 관련 자료")
+            if row["category"] in ("게임 모드", "모드 관련 자료")
         )
         games: dict[str, int] = {}
         for row in rows:
