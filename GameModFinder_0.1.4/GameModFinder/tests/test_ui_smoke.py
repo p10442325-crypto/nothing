@@ -28,10 +28,19 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
         self.assertTrue(hasattr(window.following_browser, "image_preview"))
         self.assertTrue(hasattr(window.following_browser, "_thumbnail_workers"))
+        self.assertIsNone(window.findChild(ui.QFrame, "Header"))
         window.close()
 
     def test_post_browser_opens_full_width_detail_and_returns_to_title_list(self):
         browser = ui.PostBrowser()
+        image_only = Post.from_api({
+            "id": "post-image-only",
+            "service": "fanbox",
+            "user": "creator-1",
+            "title": "이미지만 있는 게시물",
+            "content": "이미지 게시물",
+            "file": {"name": "preview.jpg", "path": "/data/cd/preview.jpg"},
+        })
         post = Post.from_api({
             "id": "post-1",
             "service": "fanbox",
@@ -39,19 +48,30 @@ class DesktopSmokeTests(unittest.TestCase):
             "title": "제목만 보이는 게시물",
             "content": "본문 전체 내용",
             "file": {"name": "sample-mod.zip", "path": "/data/ab/sample-mod.zip"},
-            "attachments": [{"name": "preview.jpg", "path": "/data/cd/preview.jpg"}],
+            "attachments": [
+                {"name": "preview.jpg", "path": "/data/cd/preview.jpg"},
+                {"name": "readme.txt", "path": "/data/ef/readme.txt"},
+            ],
         })
-        browser.set_posts([post])
+        browser.set_posts([image_only, post])
 
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
+        self.assertEqual(len(browser.posts), 1)
+        self.assertEqual(browser.items.count(), 1)
         self.assertEqual(browser.items.item(0).text(), "제목만 보이는 게시물")
         self.assertEqual(browser.items.viewMode(), ui.QListView.IconMode)
-        self.assertEqual(browser.items.iconSize().width(), 176)
+        self.assertEqual(browser.items.verticalScrollMode(), ui.QListView.ScrollPerPixel)
+        self.assertEqual(browser.items.verticalScrollBar().singleStep(), 24)
+        browser.resize(1200, 760)
+        browser._update_card_grid()
+        self.assertGreater(browser.items.gridSize().width(), 216)
 
         browser.items.itemClicked.emit(browser.items.item(0))
         self.assertEqual(browser.stack.currentWidget(), browser.detail_page)
         self.assertEqual(browser.title.text(), "제목만 보이는 게시물")
-        self.assertEqual(len(browser.attachment_buttons), 2)
+        self.assertTrue(browser.title.isHidden())
+        self.assertTrue(browser.meta.isHidden())
+        self.assertEqual(len(browser.attachment_buttons), 1)
         self.assertTrue(all(button.text() == "다운로드" for button in browser.attachment_buttons))
         self.assertFalse(hasattr(browser, "files"))
 
