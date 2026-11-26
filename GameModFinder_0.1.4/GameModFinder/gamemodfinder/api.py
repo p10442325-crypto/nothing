@@ -269,3 +269,19 @@ class PawchiveClient:
         """Return the public creator index when the upstream exposes it."""
         payload = self._get_json("creators")
         return self._extract_collection(payload, ("creators", "results", "data", "items"))
+
+
+    def get_creator_profile(self, service: str, creator_id: str) -> dict[str, Any]:
+        """Fetch the public profile for a creator."""
+        service = str(service or "").strip().strip("/")
+        creator_id = str(creator_id or "").strip().strip("/")
+        if not service or not creator_id or "/" in service or "/" in creator_id:
+            raise ValueError("service와 creator_id가 올바르지 않습니다.")
+        payload = self._get_json(f"{service}/user/{creator_id}/profile")
+        if isinstance(payload, dict):
+            for key in ("creator", "profile", "data"):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    return nested
+            return payload
+        raise PawchiveAPIError("예상하지 못한 Pawchive 프로필 응답 형식입니다.")
