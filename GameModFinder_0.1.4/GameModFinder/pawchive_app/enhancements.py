@@ -292,10 +292,12 @@ def render_post_html(content: str, attachments: tuple[Attachment, ...] | list[At
         if not source or source in seen:
             continue
         seen.add(source)
+        # Keep the image itself, but do not print the original filename
+        # (e.g. "preview.jpg") as a caption underneath it.
         images.append(
             '<figure style="margin:12px 0;">'
-            f'<img src="{html.escape(source, quote=True)}" alt="{html.escape(attachment.name, quote=True)}" style="max-width:100%;height:auto;">'
-            f'<figcaption>{html.escape(attachment.name)}</figcaption></figure>'
+            f'<img src="{html.escape(source, quote=True)}" alt="" style="display:block;max-width:100%;height:auto;">'
+            '</figure>'
         )
     if images:
         body += '<hr><h3>첨부 이미지</h3>' + "".join(images)
@@ -303,12 +305,12 @@ def render_post_html(content: str, attachments: tuple[Attachment, ...] | list[At
         body = "<p>(본문 없음)</p>"
     return (
         "<html><head><meta charset='utf-8'><style>"
-        "body{font-family:'Segoe UI','Malgun Gothic',sans-serif;color:#e8edf5;background:#151d28;}"
-        "p{line-height:1.55;margin:7px 0;}h1,h2,h3,h4{color:#f3f6fb;margin:14px 0 7px;}"
+        "body{font-family:'Segoe UI','Malgun Gothic',sans-serif;font-size:12pt;line-height:1.7;color:#e8edf5;background:#151d28;margin:12px;}"
+        "p{line-height:1.75;margin:9px 0;}h1,h2,h3,h4{color:#f3f6fb;margin:16px 0 8px;}"
         "a{color:#83b7f2;}blockquote{border-left:3px solid #547da9;padding:4px 12px;color:#c2d1e1;}"
         "pre,code{background:#0e141d;border-radius:4px;padding:2px 4px;}pre{padding:10px;white-space:pre-wrap;}"
         "table{border-collapse:collapse;}td,th{border:1px solid #53657b;padding:5px;}"
-        "figcaption{font-size:9pt;color:#aab8c9;margin-top:4px;}"
+        
         "</style></head><body>" + body + "</body></html>"
     )
 
