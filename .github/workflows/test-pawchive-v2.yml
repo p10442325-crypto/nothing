@@ -1,0 +1,25 @@
+name: Pawchive Mod Finder v2 tests
+
+on:
+  push:
+    branches:
+      - feature/pawchive-mod-finder-v2
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: GameModFinder_0.1.4/GameModFinder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python modules
+        run: python -m compileall -q pawchive_app main_v2.py
+      - name: Run Pawchive core tests
+        run: python -m unittest discover -s tests -p "test_pawchive_app.py" -v
