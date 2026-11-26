@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import tarfile
 import unittest
@@ -10,6 +13,7 @@ from pathlib import Path
 from urllib.error import URLError
 from unittest.mock import patch
 
+from pawchive_app import downloads
 from pawchive_app.api import PawchiveClient
 from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
 from pawchive_app.enhancements import pawchive_image_url
@@ -205,6 +209,38 @@ class DownloadSafetyTests(unittest.TestCase):
         self.assertEqual(result, b"thumbnail")
         self.assertEqual(again, b"thumbnail")
         curl_transfer.assert_called_once()
+
+    def test_thumbnail_fetch_persists_cache_between_sessions(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/disk-cache-speed-v3.jpg?f=disk-cache-speed-v3.jpg"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            with patch("pawchive_app.downloads._curl_transfer") as transfer:
+                transfer.side_effect = lambda _url, destination, _timeout, **kwargs: Path(destination).write_bytes(b"cached-thumbnail")
+                self.assertEqual(fetch_thumbnail_bytes(url), b"cached-thumbnail")
+                transfer.assert_called_once()
+
+            key = downloads._thumbnail_cache_key(url, None)
+            cache_path = downloads._thumbnail_cache_path(key)
+            self.assertTrue(cache_path.is_file())
+
+            with downloads._THUMB_CACHE_LOCK:
+                removed = downloads._THUMB_CACHE.pop(key, None)
+                if removed is not None:
+                    downloads._THUMB_CACHE_SIZE -= len(removed)
+            with patch("pawchive_app.downloads._curl_transfer", side_effect=AssertionError("disk cache should be used")):
+                self.assertEqual(fetch_thumbnail_bytes(url), b"cached-thumbnail")
+
+    def test_simultaneous_thumbnail_requests_share_one_transfer(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/shared-thumbnail-v3.jpg?f=shared-thumbnail-v3.jpg"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            with patch("pawchive_app.downloads._curl_transfer") as transfer:
+                def save_payload(_url, destination, _timeout, **kwargs):
+                    time.sleep(0.2)
+                    Path(destination).write_bytes(b"shared-thumbnail")
+                transfer.side_effect = save_payload
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(lambda _index: fetch_thumbnail_bytes(url), range(2)))
+                self.assertEqual(results, [b"shared-thumbnail", b"shared-thumbnail"])
+                transfer.assert_called_once()
 
     @patch("pawchive_app.downloads.subprocess.run")
     @patch("pawchive_app.downloads.shutil.which", return_value="curl.exe")
