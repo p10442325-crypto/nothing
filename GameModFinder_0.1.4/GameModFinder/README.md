@@ -7,9 +7,10 @@ Pawchive에서 원하는 크리에이터를 찾아 팔로우하고, 게시물을
 ## 실행 방법 (Windows)
 
 1. Python 3.10 이상을 설치합니다. https://www.python.org/downloads/windows/
-2. ZIP 파일을 내려받아 압축 해제합니다.
-3. `GameModFinder` 폴더 안의 `run.bat`을 더블클릭합니다.
-4. 첫 실행은 가상환경과 Python 패키지를 자동으로 설치합니다.
+2. Google Chrome 또는 Microsoft Edge를 설치합니다. Python 연결이 Windows에서 끊기는 경우 설치된 브라우저로 다시 연결합니다.
+3. ZIP 파일을 내려받아 압축 해제합니다.
+4. `GameModFinder` 폴더 안의 `run.bat`을 더블클릭합니다.
+5. 첫 실행은 가상환경과 Python 패키지를 자동으로 설치합니다.
 
 ## 화면
 
@@ -37,7 +38,7 @@ Pawchive에서 원하는 크리에이터를 찾아 팔로우하고, 게시물을
 
 ## Pawchive API와 다운로드
 
-기본 API 주소는 `https://pawchive.pw/api/v1`, 파일 호스트는 `https://file.pawchive.pw/data/...` 입니다. API 요청에는 계정 쿠키를 보내지 않습니다. 파일 서버가 특정 파일에 세션을 요구할 수 있으며, 이 경우 설정에 입력한 선택적 세션 키는 파일 다운로드 요청에만 사용됩니다.
+기본 API 주소는 `https://pawchive.pw/api/v1`, 파일 호스트는 `https://file.pawchive.pw/data/...` 입니다. API 요청에는 계정 쿠키를 보내지 않습니다. Windows에서 Python HTTPS 연결이 원격 호스트에 의해 재설정되면 앱이 설치된 Chrome 또는 Edge로 같은 공개 API 요청을 다시 시도합니다. 이 브라우저 세션은 별도 임시 세션이며 사용자의 일반 브라우저 쿠키를 읽지 않습니다. 파일 서버가 특정 파일에 세션을 요구할 수 있으며, 이 경우 설정에 입력한 선택적 세션 키는 파일 다운로드 요청에만 사용됩니다.
 
 참고 문서:
 - https://ktoolbox.readthedocs.io/latest/about-pawchive/
