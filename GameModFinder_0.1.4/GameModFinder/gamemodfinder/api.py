@@ -185,7 +185,7 @@ class PawchiveClient:
     def _get_json(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
         """Fetch one public API endpoint using the same isolated browser session."""
         self._ensure_browser()
-        url = urljoin(self.base_url + "/", endpoint.lstrip("/"))
+        url = urljoin(self.base_url, endpoint.lstrip("/"))
         if params:
             url = f"{url}?{urlencode(params)}"
 
