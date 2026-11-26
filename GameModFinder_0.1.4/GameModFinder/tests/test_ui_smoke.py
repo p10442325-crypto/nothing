@@ -25,7 +25,10 @@ class DesktopSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ, {"APPDATA": temp_dir, "LOCALAPPDATA": temp_dir}
         ):
-            window = MainWindow()
+            with patch.object(ui.MainWindow, "_load_creators"), patch.object(
+                ui.MainWindow, "_load_following_local"
+            ):
+                window = MainWindow()
             self.assertEqual(
                 [window.tabs.tabText(i) for i in range(window.tabs.count())],
                 ["팔로잉", "크리에이터", "크리에이터 찾기", "전체 탐색", "다운로드", "설정"],
