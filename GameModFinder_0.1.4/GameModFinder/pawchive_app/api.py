@@ -229,7 +229,7 @@ class PawchiveClient:
                       query: str | None = None) -> list[Post]:
         if offset < 0 or offset % 50:
             raise ValueError("Pawchive offset은 0 이상의 50 단위여야 합니다.")
-        path = f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}/posts"
+        path = f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}"
         raw = self._list_payload(
             self._get_json(path, {"q": query, "o": offset}),
             "크리에이터 게시물 목록",
