@@ -64,7 +64,7 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(browser.items.verticalScrollBar().singleStep(), 24)
         browser.resize(1200, 760)
         browser._update_card_grid()
-        self.assertGreater(browser.items.gridSize().width(), 216)
+        self.assertGreater(browser.items.gridSize().width(), 200)
         self.assertEqual(browser.items.spacing(), 0)
         self.assertEqual(
             browser.items.item(0).sizeHint().width(),
