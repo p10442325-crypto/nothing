@@ -115,13 +115,17 @@ class FinderDatabase:
                 SELECT DISTINCT service, user_id, user_id
                 FROM posts WHERE service <> '' AND user_id <> ''
             """)
-            rows = con.execute("""
-                SELECT post_key, title, content, file_json, attachments_json,
-                       tags_json, service, user_id
-                FROM posts
-            """).fetchall()
-            for row in rows:
-                self._replace_fts(con, row)
+            post_count = con.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+            fts_count = con.execute("SELECT COUNT(*) FROM posts_fts").fetchone()[0]
+            if fts_count != post_count:
+                rows = con.execute("""
+                    SELECT post_key, title, content, file_json, attachments_json,
+                           tags_json, service, user_id
+                    FROM posts
+                """).fetchall()
+                for row in rows:
+                    self._replace_fts(con, row)
+            # Recompute compact creator aggregates once at startup.
             creator_keys = con.execute("SELECT service, user_id FROM creators").fetchall()
             for creator in creator_keys:
                 self._refresh_creator_stats(con, creator["service"], creator["user_id"])
