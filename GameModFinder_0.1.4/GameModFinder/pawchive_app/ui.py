@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtGui import QDesktopServices, QPixmap, QIcon
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog,
 )
 
-from .api import PawchiveClient, PawchiveError
+from .api import APP_USER_AGENT, PawchiveClient, PawchiveError
 from .downloads import DownloadError, download_file, resolve_file_url, safe_extract_archive
 from .models import Attachment, Creator, Post, parse_creator_url
 from .repository import LocalRepository
@@ -36,6 +37,7 @@ QLineEdit,QComboBox,QSpinBox,QPlainTextEdit,QListWidget {
  selection-background-color:#355b87;
 }
 QLineEdit:focus,QComboBox:focus { border:1px solid #74a9e9; }
+QLabel#PostPreview { background:#0e141d; border:1px solid #334258; border-radius:8px; color:#94a4ba; padding:6px; }
 QPushButton { background:#26374d; border:1px solid #405672; border-radius:8px; padding:8px 13px; font-weight:600; }
 QPushButton:hover { background:#324a67; }
 QPushButton:disabled { color:#778598; background:#1a2430; }
@@ -120,6 +122,14 @@ class PostBrowser(QWidget):
         self.content = QTextBrowser()
         self.content.setOpenExternalLinks(False)
         self.content.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
+        self.image_preview = QLabel("이미지 미리보기")
+        self.image_preview.setObjectName("PostPreview")
+        self.image_preview.setAlignment(Qt.AlignCenter)
+        self.image_preview.setMinimumHeight(130)
+        self.image_preview.setMaximumHeight(210)
+        self.network = QNetworkAccessManager(self)
+        self.network.finished.connect(self._thumbnail_loaded)
+        self._current_thumbnail_url = ""
         self.files = QComboBox()
         self.download_button = QPushButton("선택한 파일 다운로드")
         self.download_button.setObjectName("Primary")
@@ -131,7 +141,9 @@ class PostBrowser(QWidget):
         right.addWidget(self.title)
         right.addWidget(self.meta)
         right.addWidget(QLabel("본문"))
-        right.addWidget(self.content, 1)
+        right.addWidget(self.content, 2)
+        right.addWidget(QLabel("이미지 미리보기"))
+        right.addWidget(self.image_preview)
         right.addWidget(QLabel("첨부 파일"))
         right.addWidget(self.files)
         row = QHBoxLayout()
@@ -159,6 +171,8 @@ class PostBrowser(QWidget):
             self.title.setText("표시할 게시물이 없습니다")
             self.meta.setText("")
             self.content.clear()
+            self.image_preview.setText("이미지 미리보기")
+            self.image_preview.setPixmap(QPixmap())
             self.files.clear()
             self.download_button.setEnabled(False)
             self.open_button.setEnabled(False)
@@ -171,11 +185,66 @@ class PostBrowser(QWidget):
         self.title.setText(post.title)
         self.meta.setText(f"{post.service} · 크리에이터 {post.creator_id} · 게시물 {post.post_id}\n게시일: {post.published or '정보 없음'}")
         self.content.setMarkdown(post.content or "(본문 없음)")
+        self._load_thumbnail(post)
         self.files.clear()
         for file in post.files:
             self.files.addItem(file.name or file.path, file)
         self.download_button.setEnabled(bool(post.files))
         self.open_button.setEnabled(True)
+
+    def _load_thumbnail(self, post: Post) -> None:
+        self._current_thumbnail_url = ""
+        self.image_preview.setPixmap(QPixmap())
+        self.image_preview.setText("이미지 미리보기 확인 중…")
+        candidates = []
+        for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
+            value = post.raw.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+        for attachment in post.files:
+            if Path(attachment.name).suffix.lower() in {
+                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"
+            }:
+                candidates.append(attachment.path)
+        for candidate in candidates:
+            try:
+                thumb_url = resolve_thumbnail_url(candidate)
+            except DownloadError:
+                continue
+            self._current_thumbnail_url = thumb_url
+            request = QNetworkRequest(QUrl(thumb_url))
+            request.setRawHeader(b"User-Agent", APP_USER_AGENT.encode("utf-8"))
+            request.setRawHeader(b"Accept", b"image/avif,image/webp,image/png,image/jpeg,*/*;q=0.8")
+            self.network.get(request)
+            return
+        self.image_preview.setText("미리보기 가능한 이미지 첨부가 없습니다.")
+
+    def _thumbnail_loaded(self, reply) -> None:
+        try:
+            if reply.request().url().toString() != self._current_thumbnail_url:
+                return
+            if reply.error():
+                self.image_preview.setText("썸네일을 불러오지 못했습니다. 원본 게시물에서 확인해 주세요.")
+                return
+            payload = bytes(reply.readAll())
+            if not payload or len(payload) > 16 * 1024 * 1024:
+                self.image_preview.setText("이미지 크기가 너무 크거나 응답이 비어 있습니다.")
+                return
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(payload):
+                self.image_preview.setText("Pawchive에서 이미지 형식을 확인할 수 없습니다.")
+                return
+            self.image_preview.setPixmap(pixmap.scaled(
+                max(180, self.image_preview.width() - 16),
+                max(100, self.image_preview.height() - 12),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            ))
+            selected = self.items.currentItem()
+            if selected:
+                selected.setIcon(QIcon(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+        finally:
+            reply.deleteLater()
 
     def _download(self) -> None:
         if self.current_post and self.files.currentData():
