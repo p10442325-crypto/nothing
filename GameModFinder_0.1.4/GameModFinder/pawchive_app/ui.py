@@ -199,10 +199,25 @@ class PostBrowser(QWidget):
         self.image_preview.setPixmap(QPixmap())
         self.image_preview.setText("이미지 미리보기 확인 중…")
         candidates = []
+        media_objects = [post.raw.get("file")]
+        raw_attachments = post.raw.get("attachments")
+        if isinstance(raw_attachments, list):
+            media_objects.extend(raw_attachments)
+        for media in media_objects:
+            if isinstance(media, dict):
+                for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
+                    value = media.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append(value.strip())
         for key in ("thumbnail", "thumbnail_url", "preview", "preview_url"):
             value = post.raw.get(key)
             if isinstance(value, str) and value.strip():
                 candidates.append(value.strip())
+        # Prefer supported Pawchive image links embedded in the post body too.
+        for match in re.findall(r'<img[^>]+src=["\\']([^"\\']+)', post.content or "", flags=re.I):
+            candidates.append(match)
+        for match in re.findall(r'!\\[[^\\]]*\\]\\(([^)]+)\\)', post.content or ""):
+            candidates.append(match.strip().strip("<>"))
         for attachment in post.files:
             if Path(attachment.name).suffix.lower() in {
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"
