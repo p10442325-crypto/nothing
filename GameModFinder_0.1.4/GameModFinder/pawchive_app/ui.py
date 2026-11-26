@@ -45,7 +45,7 @@ QPushButton#Primary:hover { background:#4b89db; }
 QListWidget { border:0; background:transparent; padding:2px; }
 QListWidget::item { background:#182230; border:1px solid #2b3b50; border-radius:8px; padding:10px; margin:3px 1px; }
 QListWidget::item:selected { background:#213a56; border-color:#6596cd; }
-QListWidget#PostList::item { background:#182230; border:1px solid #2b3b50; border-radius:12px; padding:8px; margin:5px; }
+QListWidget#PostList::item { background:#182230; border:1px solid #2b3b50; border-radius:12px; padding:8px; margin:3px 0px; }
 QFrame#AttachmentCard { background:#182230; border:1px solid #304158; border-radius:9px; }
 QTextBrowser#PostContent { background:#101822; border:1px solid #334258; border-radius:10px; padding:14px; font-size:11pt; }
 QTabWidget::pane { border:1px solid #2a394c; border-radius:10px; background:#151d28; }
@@ -131,6 +131,12 @@ class PostBrowser(QWidget):
         list_header.addWidget(self.list_count)
         list_layout.addLayout(list_header)
 
+        self.search_input = QLineEdit(self.list_page)
+        self.search_input.setPlaceholderText("게시물 제목 · 본문 · 크리에이터 · 첨부파일 검색")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self.filter_posts)
+        list_layout.addWidget(self.search_input)
+
         # Rectangular image cards with wrapped titles.
         self.items = QListWidget()
         self.items.setObjectName("PostList")
@@ -147,7 +153,7 @@ class PostBrowser(QWidget):
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.items.setIconSize(QSize(176, 126))
         self.items.setGridSize(QSize(216, 204))
-        self.items.setSpacing(3)
+        self.items.setSpacing(0)
         self.items.verticalScrollBar().setSingleStep(24)
         self.items.verticalScrollBar().setPageStep(160)
         self.items.itemClicked.connect(self._open_item)
@@ -309,6 +315,7 @@ class PostBrowser(QWidget):
         self.posts = posts
         self.items.clear()
         self.current_post = None
+        self.search_input.clear()
         self.stack.setCurrentWidget(self.list_page)
 
         for post in posts:
@@ -325,15 +332,48 @@ class PostBrowser(QWidget):
                 self._thumbnail_items.setdefault(thumb_url, []).append(item)
             self.items.addItem(item)
 
-        self.list_count.setText(f"{len(posts)}개")
-        self.items.setVisible(bool(posts))
-        self.list_empty.setVisible(not posts)
+        self.filter_posts("")
         self.title.setText("게시물을 선택하세요")
         self.meta.clear()
         self.content.clear()
         self._clear_attachment_cards()
         self.open_button.setEnabled(False)
         QTimer.singleShot(0, lambda expected=generation: self._refresh_card_layout(expected))
+
+    def filter_posts(self, query: str = "") -> None:
+        """Filter the loaded archive-post list without discarding cached posts."""
+        needle = " ".join((query or "").casefold().split())
+        visible_count = 0
+        for index, post in enumerate(self.posts):
+            item = self.items.item(index)
+            if item is None:
+                continue
+            attachment_text = " ".join(
+                f"{attachment.name} {attachment.path}" for attachment in post.files
+            )
+            searchable = " ".join((
+                post.title, post.content, post.service, post.creator_id,
+                post.post_id, attachment_text,
+            )).casefold()
+            visible = not needle or needle in searchable
+            item.setHidden(not visible)
+            if visible:
+                visible_count += 1
+
+        self.list_count.setText(
+            f"{visible_count:,} / {len(self.posts):,}개" if needle
+            else f"{len(self.posts):,}개"
+        )
+        self.items.setVisible(visible_count > 0)
+        if not self.posts:
+            self.list_empty.setText("압축파일이 첨부된 게시물이 없습니다.")
+            self.list_empty.setVisible(True)
+        elif visible_count == 0:
+            self.list_empty.setText("검색 결과가 없습니다.")
+            self.list_empty.setVisible(True)
+        else:
+            self.list_empty.setVisible(False)
+        self._thumbnail_debounce.start()
 
     def _refresh_card_layout(self, generation: int) -> None:
         if generation != self._thumbnail_generation:
@@ -354,18 +394,19 @@ class PostBrowser(QWidget):
         if not hasattr(self, "items"):
             return
         available = max(1, self.items.viewport().width())
-        target_cell_width = 250
-        columns = max(1, min(7, available // target_cell_width))
+        target_cell_width = 270
+        # Round up the column count so all cards distribute across the available row.
+        columns = max(1, (available + target_cell_width - 1) // target_cell_width)
         cell_width = max(1, available // columns)
-        icon_width = max(120, min(250, cell_width - 20))
-        icon_height = max(86, int(icon_width * 0.70))
+        icon_width = max(72, min(260, cell_width - 12))
+        icon_height = max(60, int(icon_width * 0.70))
         cell_height = icon_height + 78
         self._card_icon_width = icon_width
         self._card_icon_height = icon_height
         self.items.setGridSize(QSize(cell_width, cell_height))
         self.items.setIconSize(QSize(icon_width, icon_height))
         for index in range(self.items.count()):
-            self.items.item(index).setSizeHint(QSize(cell_width - 8, cell_height - 8))
+            self.items.item(index).setSizeHint(QSize(cell_width, cell_height))
 
     def _queue_visible_thumbnails(self, expected_generation: int | None = None) -> None:
         generation = self._thumbnail_generation if expected_generation is None else expected_generation
@@ -376,6 +417,8 @@ class PostBrowser(QWidget):
         queued = False
         for index in range(self.items.count()):
             item = self.items.item(index)
+            if item.isHidden():
+                continue
             url = item.data(Qt.UserRole + 1)
             if not url or url in self._thumbnail_pending or url in self._thumbnail_loaded or url in self._thumbnail_failed_urls:
                 continue
@@ -388,6 +431,8 @@ class PostBrowser(QWidget):
             # First layout can happen before the viewport has a useful geometry.
             for index in range(min(self.items.count(), 12)):
                 item = self.items.item(index)
+                if item.isHidden():
+                    continue
                 url = item.data(Qt.UserRole + 1)
                 if url and url not in self._thumbnail_pending and url not in self._thumbnail_loaded and url not in self._thumbnail_failed_urls:
                     self._thumbnail_pending.add(url)
@@ -819,7 +864,7 @@ class MainWindow(QMainWindow):
             self.creator_list.setCurrentRow(0)
 
     def _load_following_local(self) -> None:
-        rows = self.database.following_feed(limit=150)
+        rows = self.database.following_feed()
         posts = [self._post_from_row(row) for row in rows]
         self.following_browser.set_posts(posts)
 
@@ -853,7 +898,7 @@ class MainWindow(QMainWindow):
                     try:
                         posts = client.all_creator_posts(service, creator_id)
                         total += self.database.save_posts(posts)
-                        self.database.update_sync_state(service, creator_id, 50, datetime.now().isoformat(), "")
+                        self.database.update_sync_state(service, creator_id, len(posts), datetime.now().isoformat(), "")
                     except Exception as exc:
                         failed.append(f"{creator.get('name') or creator_id}: {exc}")
                         self.database.update_sync_state(service, creator_id, 0, "", str(exc))
@@ -875,7 +920,7 @@ class MainWindow(QMainWindow):
             self.creator_browser.set_posts([])
             return
         service, creator_id = item.data(Qt.UserRole)
-        rows = self.database.posts_for_creator(service, creator_id, limit=150)
+        rows = self.database.posts_for_creator(service, creator_id)
         self.creator_browser.set_posts([self._post_from_row(record) for record in rows])
 
     def refresh_selected_creator(self) -> None:
@@ -887,13 +932,13 @@ class MainWindow(QMainWindow):
 
         def task():
             with self._client() as client:
-                posts = client.creator_posts(service, creator_id, offset=0)
+                posts = client.all_creator_posts(service, creator_id)
             self.database.save_posts(posts)
-            self.database.update_sync_state(service, creator_id, 50, datetime.now().isoformat(), "")
+            self.database.update_sync_state(service, creator_id, len(posts), datetime.now().isoformat(), "")
             return posts
 
         def done(posts):
-            rows = self.database.posts_for_creator(service, creator_id, limit=150)
+            rows = self.database.posts_for_creator(service, creator_id)
             self.creator_browser.set_posts([self._post_from_row(row) for row in rows])
             self._load_following_local()
             self.status.setText(f"{len(posts)}개 게시물을 가져왔습니다.")
