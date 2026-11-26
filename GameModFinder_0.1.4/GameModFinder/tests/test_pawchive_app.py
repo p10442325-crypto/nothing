@@ -149,15 +149,15 @@ class DownloadSafetyTests(unittest.TestCase):
     def test_thumbnail_url_uses_pawchive_thumbnail_host(self):
         self.assertEqual(
             resolve_thumbnail_url("/data/ab/example.jpg"),
-            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg",
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg?f=example.jpg",
         )
         self.assertEqual(
             resolve_thumbnail_url("https://file.pawchive.pw/data/ab/example.jpg"),
-            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg",
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg?f=example.jpg",
         )
         self.assertEqual(
             resolve_thumbnail_url("https://img.pawchive.pw/thumbnail/data/ab/example.jpg"),
-            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg",
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg?f=example.jpg",
         )
         with self.assertRaises(DownloadError):
             resolve_thumbnail_url("https://evil.example/data/image.png")
