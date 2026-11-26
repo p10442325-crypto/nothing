@@ -65,6 +65,21 @@ class DesktopSmokeTests(unittest.TestCase):
         browser.resize(1200, 760)
         browser._update_card_grid()
         self.assertGreater(browser.items.gridSize().width(), 216)
+        self.assertEqual(browser.items.spacing(), 0)
+        self.assertEqual(
+            browser.items.item(0).sizeHint().width(),
+            browser.items.gridSize().width(),
+        )
+        self.assertTrue(browser.search_input.isEnabled())
+
+        browser.search_input.setText("sample-mod.zip")
+        self.assertFalse(browser.items.item(0).isHidden())
+        self.assertIn("1", browser.list_count.text())
+        browser.search_input.setText("not-a-real-post")
+        self.assertTrue(browser.items.item(0).isHidden())
+        self.assertEqual(browser.list_empty.text(), "검색 결과가 없습니다.")
+        browser.search_input.clear()
+        self.assertFalse(browser.items.item(0).isHidden())
 
         browser.items.itemClicked.emit(browser.items.item(0))
         self.assertEqual(browser.stack.currentWidget(), browser.detail_page)
