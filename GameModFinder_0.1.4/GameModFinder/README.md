@@ -39,7 +39,7 @@ Pawchive에서 원하는 크리에이터를 찾아 팔로우하고, 게시물을
 
 ## Pawchive API와 다운로드
 
-기본 API 주소는 `https://pawchive.pw/api/v1`, 원본 파일 호스트는 `https://file.pawchive.pw/data/...`, 이미지 미리보기는 `https://img.pawchive.pw/thumbnail/data/...` 입니다. API 요청에는 계정 쿠키를 보내지 않습니다. Windows에서 Python HTTPS 연결이 끊기는 API 요청은 설치된 Chrome 또는 Edge의 임시 세션으로 재시도합니다. **파일과 이미지 요청에는 브라우저를 흉내 내는 User-Agent를 사용하지 않습니다.** Pawchive 파일 서버 정책에 맞춰 프로젝트 주소를 포함한 앱 식별 User-Agent, HTTP/1.1, 초당 1회 연결 제한, 파일명 `f` 파라미터를 사용해 `curl.exe`로 전송합니다. 376바이트 반응은 서버의 자동 요청 제한으로 판별해 파일로 저장하지 않습니다. 설정한 선택적 세션 키는 파일/이미지 요청에만 사용됩니다.
+기본 API 주소는 `https://pawchive.pw/api/v1`, 원본 파일 호스트는 `https://file.pawchive.pw/data/...`, 이미지 미리보기는 `https://img.pawchive.pw/thumbnail/data/...` 입니다. API 요청에는 계정 쿠키를 보내지 않습니다. **파일과 이미지 요청에는 브라우저를 흉내 내는 User-Agent를 사용하지 않습니다.** 프로젝트 주소를 포함한 앱 식별 User-Agent, HTTP/1.1, 초당 1회 연결 제한, 파일명 `f` 파라미터를 사용해 `curl.exe`로 전송하며, Windows의 IPv6 경로 문제를 피하도록 IPv4를 먼저 시도합니다. curl TLS 연결이 계속 끊기면 설치된 Chrome 또는 Edge를 대체 TLS 전송 계층으로 사용하되, 요청 User-Agent는 계속 앱 식별자로 유지하고 HTTP/2·QUIC은 끕니다. 376바이트 반응은 서버의 자동 요청 제한으로 판별해 파일로 저장하지 않습니다. 설정한 선택적 세션 키는 파일/이미지 요청에만 사용됩니다.
 
 참고 문서:
 - https://ktoolbox.readthedocs.io/latest/about-pawchive/
