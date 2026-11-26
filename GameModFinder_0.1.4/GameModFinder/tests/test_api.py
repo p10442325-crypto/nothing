@@ -34,3 +34,34 @@ def test_offset_must_be_multiple_of_50():
     with pytest.raises(ValueError):
         client.get_posts("Raiden", offset=10)
     client.close()
+
+
+
+def test_creator_posts_uses_public_creator_timeline(monkeypatch):
+    client = PawchiveClient("https://pawchive.pw/api/v1")
+    calls = []
+
+    def fake_get_json(endpoint, params=None):
+        calls.append((endpoint, params))
+        return {"posts": [{"id": "7", "service": "patreon", "user": "42"}]}
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    posts = client.get_creator_posts("patreon", "42", offset=50)
+    assert posts[0]["id"] == "7"
+    assert calls == [("patreon/user/42", {"o": 50})]
+
+
+def test_creator_index_and_profile_routes(monkeypatch):
+    client = PawchiveClient("https://pawchive.pw/api/v1")
+    calls = []
+
+    def fake_get_json(endpoint, params=None):
+        calls.append((endpoint, params))
+        if endpoint == "creators":
+            return {"creators": [{"service": "fanbox", "id": "9"}]}
+        return {"profile": {"name": "Creator"}}
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    assert client.get_creators()[0]["id"] == "9"
+    assert client.get_creator_profile("fanbox", "9")["name"] == "Creator"
+    assert calls == [("creators", None), ("fanbox/user/9/profile", None)]

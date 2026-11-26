@@ -88,6 +88,63 @@ class SearchService:
                 add(token)
         return queries
 
+    def expand_local_queries(
+        self, user_query: str, game_key: str, use_aliases: bool = True,
+        multilingual: bool = True,
+    ) -> list[str]:
+        """Expand a local query broadly; local matching has no remote request budget."""
+        raw = re.sub(r"\s+", " ", user_query).strip()
+        if not raw:
+            return []
+        queries: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            text = re.sub(r"\s+", " ", str(value or "")).strip()
+            key = text.casefold()
+            if len(text) >= 2 and key not in seen:
+                seen.add(key)
+                queries.append(text)
+
+        add(raw)
+        if not use_aliases:
+            return queries
+
+        games = [(game_key, self.aliases.get(game_key, {}))] if game_key in self.aliases else list(self.aliases.items())
+        lower = raw.casefold()
+        matched_characters: list[list[str]] = []
+        matched_outfits: list[list[str]] = []
+
+        for _, game in games:
+            for canonical, aliases in game.get("characters", {}).items():
+                names = [str(canonical), *[str(value) for value in aliases]]
+                if any(name and name.casefold() in lower for name in names):
+                    matched_characters.append(names)
+                    for name in names:
+                        add(name)
+            for canonical, aliases in game.get("outfits", {}).items():
+                names = [str(canonical), *[str(value) for value in aliases]]
+                if any(name and name.casefold() in lower for name in names):
+                    matched_outfits.append(names)
+                    for name in names:
+                        add(name)
+            if multilingual:
+                for alias in game.get("aliases", []):
+                    if str(alias).casefold() in lower:
+                        add(alias)
+
+        # Include combinations as well as independent aliases to catch titles
+        # where the character and costume are indexed together.
+        for characters in matched_characters:
+            for outfits in matched_outfits:
+                for character in characters:
+                    for outfit in outfits:
+                        add(f"{character} {outfit}")
+
+        for token in re.split(r"[\s,;|]+", raw):
+            add(token)
+        return queries
+
     def search(
         self,
         user_query: str,

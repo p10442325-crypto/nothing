@@ -180,3 +180,108 @@ class PawchiveClient:
             return self._parse_posts_payload(body)
 
         return []
+
+
+    def _get_json(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
+        """Fetch one public API endpoint using the same isolated browser session."""
+        self._ensure_browser()
+        url = urljoin(self.base_url, endpoint.lstrip("/"))
+        if params:
+            url = f"{url}?{urlencode(params)}"
+
+        for attempt in range(2):
+            self._pace()
+            try:
+                response = self._page.goto(
+                    url, wait_until="domcontentloaded", timeout=self.timeout * 1000
+                )
+                self._last_request_at = time.monotonic()
+            except Exception as exc:
+                self._last_request_at = time.monotonic()
+                if attempt == 0:
+                    time.sleep(1.5)
+                    continue
+                raise PawchiveAPIError(
+                    f"Pawchive API 접속 실패 ({endpoint}): {exc}"
+                ) from exc
+
+            if response is None:
+                raise PawchiveAPIError("Pawchive에서 HTTP 응답을 받지 못했습니다.")
+            status = response.status
+            if status == 429:
+                try:
+                    retry_after = response.headers.get("retry-after", "2")
+                    wait = min(30.0, max(1.0, float(retry_after)))
+                except (AttributeError, TypeError, ValueError):
+                    wait = 3.0
+                if attempt == 0:
+                    time.sleep(wait)
+                    continue
+                raise PawchiveAPIError("요청이 너무 많아 Pawchive가 잠시 제한했습니다.")
+            if status >= 500 and attempt == 0:
+                time.sleep(1.5)
+                continue
+            if status >= 400:
+                try:
+                    detail = response.text()[:240].strip()
+                except Exception:
+                    detail = ""
+                raise PawchiveAPIError(f"Pawchive API 오류 ({status}): {detail}")
+            try:
+                body = response.text()
+                return json.loads(body)
+            except (TypeError, ValueError) as exc:
+                # Reuse the established HTML/challenge diagnostics.
+                self._parse_posts_payload(body)
+                raise PawchiveAPIError(f"Pawchive JSON 응답을 해석하지 못했습니다: {exc}") from exc
+        return None
+
+    @staticmethod
+    def _extract_collection(payload: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+                if isinstance(value, dict):
+                    for nested_key in keys:
+                        nested = value.get(nested_key)
+                        if isinstance(nested, list):
+                            return [item for item in nested if isinstance(item, dict)]
+        raise PawchiveAPIError("예상하지 못한 Pawchive 목록 응답 형식입니다.")
+
+    def get_creator_posts(
+        self, service: str, creator_id: str, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Return posts from one creator (GET /{service}/user/{id}?o=offset)."""
+        service = str(service or "").strip().strip("/")
+        creator_id = str(creator_id or "").strip().strip("/")
+        if not service or not creator_id or "/" in service or "/" in creator_id:
+            raise ValueError("service와 creator_id가 올바르지 않습니다.")
+        if offset < 0 or offset % 50:
+            raise ValueError("Pawchive offset must be a non-negative multiple of 50")
+        payload = self._get_json(f"{service}/user/{creator_id}", {"o": offset})
+        return self._extract_collection(payload, ("posts", "results", "data", "items"))
+
+    def get_creators(self) -> list[dict[str, Any]]:
+        """Return the public creator index when the upstream exposes it."""
+        payload = self._get_json("creators")
+        return self._extract_collection(payload, ("creators", "results", "data", "items"))
+
+
+    def get_creator_profile(self, service: str, creator_id: str) -> dict[str, Any]:
+        """Fetch the public profile for a creator."""
+        service = str(service or "").strip().strip("/")
+        creator_id = str(creator_id or "").strip().strip("/")
+        if not service or not creator_id or "/" in service or "/" in creator_id:
+            raise ValueError("service와 creator_id가 올바르지 않습니다.")
+        payload = self._get_json(f"{service}/user/{creator_id}/profile")
+        if isinstance(payload, dict):
+            for key in ("creator", "profile", "data"):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    return nested
+            return payload
+        raise PawchiveAPIError("예상하지 못한 Pawchive 프로필 응답 형식입니다.")
