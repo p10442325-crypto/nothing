@@ -170,19 +170,12 @@ class DownloadSafetyTests(unittest.TestCase):
             "https://img.pawchive.pw/thumbnail/data/ab/image.jpg?f=original+name.jpg",
         )
 
-    @patch("pawchive_app.downloads._browser_download")
-    @patch("pawchive_app.downloads.shutil.which", return_value=None)
-    @patch(
-        "pawchive_app.downloads.urlopen",
-        side_effect=URLError(ConnectionResetError(10054, "connection reset")),
-    )
-    def test_file_download_uses_browser_fallback_and_filename(
-        self, _mock_urlopen, _mock_which, mock_browser
-    ):
-        def save_test_payload(url, destination, timeout, session_cookie=None):
+    @patch("pawchive_app.downloads._curl_transfer")
+    def test_file_download_uses_identified_http1_curl_transport_and_filename(self, mock_curl):
+        def save_test_payload(url, destination, timeout, session_cookie=None, **kwargs):
             Path(destination).write_bytes(b"pawchive-test")
 
-        mock_browser.side_effect = save_test_payload
+        mock_curl.side_effect = save_test_payload
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "original.bin"
             saved = download_file(
@@ -191,8 +184,7 @@ class DownloadSafetyTests(unittest.TestCase):
                 filename="original.bin",
             )
             self.assertEqual(saved.read_bytes(), b"pawchive-test")
-            request_url = mock_browser.call_args.args[0]
-            self.assertIn("?f=original.bin", request_url)
+            self.assertIn("?f=original.bin", mock_curl.call_args.args[0])
 
     def test_html_attachment_path_maps_to_thumbnail_host_with_filename(self):
         self.assertEqual(
@@ -204,17 +196,51 @@ class DownloadSafetyTests(unittest.TestCase):
             "https://img.pawchive.pw/thumbnail/data/f6/bb/image.jpg?f=image.jpg",
         )
 
-    def test_thumbnail_fetch_uses_browser_and_reuses_cache(self):
-        url = "https://img.pawchive.pw/thumbnail/data/test/cache-image.jpg?f=cache-image.jpg"
-        with patch("pawchive_app.downloads._browser_download") as browser:
-            browser.side_effect = lambda _url, destination, _timeout, session_cookie=None: Path(destination).write_bytes(b"thumbnail")
-            with patch("pawchive_app.downloads._THUMB_CACHE_LOCK"):
-                pass
+    def test_thumbnail_fetch_uses_curl_and_reuses_cache(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/cache-image-v2.jpg?f=cache-image-v2.jpg"
+        with patch("pawchive_app.downloads._curl_transfer") as curl_transfer:
+            curl_transfer.side_effect = lambda _url, destination, _timeout, session_cookie=None, **kwargs: Path(destination).write_bytes(b"thumbnail")
             result = fetch_thumbnail_bytes(url)
             again = fetch_thumbnail_bytes(url)
         self.assertEqual(result, b"thumbnail")
         self.assertEqual(again, b"thumbnail")
-        browser.assert_called_once()
+        curl_transfer.assert_called_once()
+
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads.shutil.which", return_value="curl.exe")
+    def test_curl_transport_uses_http11_and_identifiable_user_agent(
+        self, _mock_which, mock_run
+    ):
+        def fake_run(command, **_kwargs):
+            header_path = Path(command[command.index("-D") + 1])
+            output_path = Path(command[command.index("-o") + 1])
+            header_path.write_text(
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n",
+                encoding="ascii",
+            )
+            output_path.write_bytes(b"abcdef")
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "curl.bin"
+            from pawchive_app.downloads import _curl_transfer
+            _curl_transfer(
+                "https://file.pawchive.pw/data/ab/curl.bin?f=curl.bin",
+                target,
+                60,
+                resume=False,
+            )
+            self.assertEqual(target.read_bytes(), b"abcdef")
+        command = mock_run.call_args.args[0]
+        self.assertIn("--http1.1", command)
+        self.assertTrue(any(str(item).startswith("User-Agent: PawchiveModFinder/") for item in command))
+        self.assertIn("-f", command)
 
     def test_zip_extracts_inside_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
