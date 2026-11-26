@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -55,7 +56,8 @@ class DesktopSmokeTests(unittest.TestCase):
                 {"name": "readme.txt", "path": "/data/ef/readme.txt"},
             ],
         })
-        browser.set_posts([image_only, post])
+        with patch.object(ui.PostBrowser, "_thumbnail_url_for_post", return_value=""):
+            browser.set_posts([image_only, post])
 
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
         self.assertEqual(len(browser.posts), 1)
