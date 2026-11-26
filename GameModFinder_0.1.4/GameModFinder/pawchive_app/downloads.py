@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -154,121 +155,139 @@ def resolve_thumbnail_url(path_or_url: str, filename: str | None = None) -> str:
     return "https://img.pawchive.pw" + encoded_path + (f"?{query_string}" if query_string else "")
 
 
-def _browser_download(
+def _curl_headers(header_path: Path) -> tuple[int | None, int | None]:
+    """Read final HTTP status and full response size from curl -D output."""
+    try:
+        raw = header_path.read_text(encoding="iso-8859-1", errors="replace")
+    except OSError:
+        return None, None
+
+    statuses = re.findall(r"^HTTP/\S+\s+(\d{3})", raw, flags=re.I | re.M)
+    status = int(statuses[-1]) if statuses else None
+
+    ranges = re.findall(r"^Content-Range:\s*bytes\s+\d+-\d+/(\d+)", raw, flags=re.I | re.M)
+    if ranges:
+        return status, int(ranges[-1])
+
+    lengths = re.findall(r"^Content-Length:\s*(\d+)", raw, flags=re.I | re.M)
+    return status, int(lengths[-1]) if lengths else None
+
+
+def _curl_transfer(
     url: str,
     destination: str | Path,
     timeout: int,
     session_cookie: str | None = None,
+    *,
+    resume: bool = True,
+    attempts: int = 5,
 ) -> Path:
-    """Use an installed Chrome/Edge browser when Python and curl transports reset."""
+    """Download from Pawchive with its documented identifiable UA and HTTP/1.1."""
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not (host == "pawchive.pw" or host.endswith(".pawchive.pw")):
-        raise DownloadError("브라우저 재시도 주소가 Pawchive 호스트가 아닙니다.")
+    if parsed.scheme != "https" or not (
+        host == "pawchive.pw" or host.endswith(".pawchive.pw")
+    ):
+        raise DownloadError("다운로드 주소가 Pawchive HTTPS 서버가 아닙니다.")
 
-    try:
-        from playwright.sync_api import Error as PlaywrightError, sync_playwright
-    except ImportError as exc:
-        raise DownloadError("Playwright가 없습니다. 앱 폴더에서 run.bat을 다시 실행해 주세요.") from exc
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise DownloadError("Windows 기본 curl.exe를 찾지 못했습니다.")
 
-    errors: list[str] = []
     target = Path(destination)
-    with sync_playwright() as playwright:
-        for channel in ("chrome", "msedge"):
-            browser = None
-            context = None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header_path = target.with_name(target.name + ".headers")
+    last_error = ""
+    try:
+        for attempt in range(max(1, attempts)):
+            offset = target.stat().st_size if resume and target.exists() else 0
+            header_path.unlink(missing_ok=True)
+            command = [
+                curl,
+                "-sS",
+                "-f",
+                "-L",
+                "--http1.1",
+                "--connect-timeout", "30",
+                "--speed-limit", "1024",
+                "--speed-time", "120",
+                "-H", f"User-Agent: {APP_USER_AGENT}",
+                "-H", "Accept: */*",
+                "-D", str(header_path),
+            ]
+            if session_cookie:
+                if any(ch in session_cookie for ch in "\r\n;"):
+                    raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
+                command.extend(["-H", f"Cookie: session={session_cookie}"])
+            if offset:
+                command.extend(["-C", str(offset)])
+            command.extend(["-o", str(target), url])
+
+            _wait_download_slot()
             try:
-                browser = playwright.chromium.launch(channel=channel, headless=True)
-                context = browser.new_context(
-                    accept_downloads=True,
-                    locale="ko-KR",
-                    ignore_https_errors=False,
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(int(timeout), 130),
+                    check=False,
                 )
-                if session_cookie:
-                    if any(ch in session_cookie for ch in "\r\n;"):
-                        raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
-                    context.add_cookies([{
-                        "name": "session",
-                        "value": session_cookie,
-                        "domain": host,
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True,
-                    }])
+            except (OSError, subprocess.SubprocessError) as exc:
+                last_error = str(exc)
+                if attempt + 1 < max(1, attempts):
+                    time.sleep(3)
+                    continue
+                break
 
-                # Do not allow a file-host redirect to send cookies or data elsewhere.
-                def allow_pawchive(route):
-                    request_host = (urlsplit(route.request.url).hostname or "").lower()
-                    if request_host == "pawchive.pw" or request_host.endswith(".pawchive.pw"):
-                        route.continue_()
-                    else:
-                        route.abort()
-
-                context.route("**/*", allow_pawchive)
-                page = context.new_page()
-                downloads = []
-                page.on("download", lambda item: downloads.append(item))
-                response = None
-                navigation_error = ""
-                try:
-                    response = page.goto(
-                        url,
-                        wait_until="commit",
-                        timeout=max(5, int(timeout)) * 1000,
+            status, expected_size = _curl_headers(header_path)
+            actual_size = target.stat().st_size if target.exists() else 0
+            detail = (result.stderr or result.stdout or "").strip()
+            if result.returncode == 0 and status in (200, 206) and actual_size > 0:
+                if actual_size == 376 or expected_size == 376:
+                    target.unlink(missing_ok=True)
+                    raise DownloadError(
+                        "Pawchive가 자동 요청을 차단했습니다(376바이트 반응). "
+                        "잠시 기다린 뒤 다시 시도해 주세요."
                     )
-                except PlaywrightError as exc:
-                    navigation_error = str(exc)
-
-                if downloads:
-                    downloads[0].save_as(str(target))
-                    if target.exists() and target.stat().st_size > 0:
-                        return target
-
-                if response is not None:
-                    if response.status == 404:
-                        raise DownloadError("Pawchive 파일을 찾지 못했습니다(404).")
-                    if response.status == 429:
-                        raise DownloadError("Pawchive 요청 제한(429)에 도달했습니다. 잠시 후 다시 시도해 주세요.")
-                    if response.status >= 400:
-                        raise DownloadError(f"브라우저 파일 서버 오류: HTTP {response.status}")
-                    content_length = response.headers.get("content-length")
-                    if content_length and int(content_length) > 512 * 1024 * 1024:
-                        raise DownloadError("브라우저 재시도 파일이 너무 큽니다(512 MiB 초과).")
-                    body = response.body()
-                    if not body:
-                        raise DownloadError("브라우저에서 빈 파일 응답을 받았습니다.")
-                    if len(body) > 512 * 1024 * 1024:
-                        raise DownloadError("브라우저 재시도 파일이 너무 큽니다(512 MiB 초과).")
-                    target.write_bytes(body)
+                if expected_size is not None and actual_size != expected_size:
+                    last_error = (
+                        f"파일 크기가 응답과 다릅니다: 받은 {actual_size}B / "
+                        f"예상 {expected_size}B"
+                    )
+                else:
                     return target
+            elif status == 404:
+                target.unlink(missing_ok=True)
+                raise DownloadError("Pawchive 파일을 찾지 못했습니다(404). 원본 파일이 없을 수 있습니다.")
+            elif status == 429:
+                raise DownloadError("Pawchive 요청 제한(429)에 도달했습니다. 잠시 후 다시 시도해 주세요.")
+            elif status == 403:
+                target.unlink(missing_ok=True)
+                raise DownloadError(
+                    "Pawchive 파일 서버가 요청을 거부했습니다(403). "
+                    "파일 접근 권한 또는 서버의 자동 요청 제한을 확인해 주세요."
+                )
+            else:
+                last_error = detail or f"curl 종료 코드 {result.returncode}, HTTP {status or 'unknown'}"
+                # If the range request was ignored, restart cleanly instead of appending a full body.
+                if offset and status == 200:
+                    target.unlink(missing_ok=True)
 
-                raise DownloadError(navigation_error or "Chrome/Edge에서 파일 응답을 받지 못했습니다.")
-            except DownloadError:
-                raise
-            except Exception as exc:
-                errors.append(f"{channel}: {exc}")
-            finally:
-                if context is not None:
-                    try:
-                        context.close()
-                    except Exception:
-                        pass
-                if browser is not None:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
+            if attempt + 1 < max(1, attempts):
+                time.sleep(3)
 
-    raise DownloadError(
-        "Chrome/Edge 브라우저 전송도 실패했습니다. "
-        + (" | ".join(errors[-2:]) if errors else "사용 가능한 브라우저가 없습니다.")
-    )
+        raise DownloadError(
+            f"Pawchive 다운로드 연결에 실패했습니다({last_error or '응답 없음'}). "
+            "브라우저 흉내 UA가 아닌 앱 식별 UA와 HTTP/1.1로 재시도했지만 연결이 끊겼습니다."
+        )
+    finally:
+        header_path.unlink(missing_ok=True)
 
 
 def fetch_thumbnail_bytes(
     url: str, timeout: int = 30, session_cookie: str | None = None,
 ) -> bytes:
-    """Fetch and cache a Pawchive thumbnail through the browser transport."""
+    """Fetch a Pawchive thumbnail with the dedicated downloader transport."""
     global _THUMB_CACHE_SIZE
     parsed = urlsplit(url)
     if (
@@ -278,8 +297,6 @@ def fetch_thumbnail_bytes(
     ):
         raise DownloadError("허용되지 않은 Pawchive 썸네일 주소입니다.")
 
-    # Serialize thumbnail fetches as well as caching them. This avoids duplicate
-    # requests when both the post body and preview panel display the same image.
     with _THUMB_CACHE_LOCK:
         cached = _THUMB_CACHE.get(url)
         if cached is not None:
@@ -288,8 +305,10 @@ def fetch_thumbnail_bytes(
 
         with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
             temporary = Path(directory) / "thumbnail.bin"
-            _wait_download_slot()
-            _browser_download(url, temporary, timeout, session_cookie=session_cookie)
+            _curl_transfer(
+                url, temporary, timeout, session_cookie=session_cookie,
+                resume=False, attempts=3,
+            )
             payload = temporary.read_bytes()
 
         if not payload or len(payload) > 16 * 1024 * 1024:
@@ -310,77 +329,23 @@ def download_file(
     session_cookie: str | None = None,
     filename: str | None = None,
 ) -> Path:
-    """Download one file with Python, curl, then isolated Chrome/Edge fallback."""
+    """Download one original attachment via Pawchive's identified HTTP/1.1 curl flow."""
     url = resolve_file_url(path_or_url, filename=filename)
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         raise FileExistsError(f"파일이 이미 존재합니다: {target}")
     temporary = target.with_name(target.name + ".part")
-    headers = {"User-Agent": APP_USER_AGENT, "Accept": "*/*"}
-    if session_cookie:
-        if any(ch in session_cookie for ch in "\\r\\n;"):
-            raise DownloadError("세션 쿠키 값이 올바르지 않습니다.")
-        headers["Cookie"] = f"session={session_cookie}"
-    request = Request(url, headers=headers, method="GET")
-    python_error: Exception | None = None
     try:
-        _wait_download_slot()
-        with urlopen(request, timeout=timeout) as response, temporary.open("wb") as output:
-            if response.status >= 400:
-                raise DownloadError(f"파일 서버 오류: HTTP {response.status}")
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+        _curl_transfer(
+            url, temporary, timeout, session_cookie=session_cookie,
+            resume=True, attempts=5,
+        )
         os.replace(temporary, target)
         return target
-    except HTTPError as exc:
+    except Exception:
         temporary.unlink(missing_ok=True)
-        if exc.code == 404:
-            raise DownloadError(
-                "Pawchive 파일을 찾지 못했습니다(404). 파일 경로가 바뀌었거나 원본 파일이 없을 수 있습니다."
-            ) from exc
-        if exc.code == 429:
-            raise DownloadError("Pawchive 요청 제한(429)에 도달했습니다. 잠시 후 다시 시도해 주세요.") from exc
-        python_error = exc
-    except (URLError, OSError, TimeoutError) as exc:
-        temporary.unlink(missing_ok=True)
-        python_error = exc
-
-    curl_error = ""
-    curl = shutil.which("curl.exe") or shutil.which("curl")
-    if curl:
-        try:
-            _wait_download_slot()
-            command = [
-                curl, "--fail", "--silent", "--show-error",
-                "--max-time", str(int(timeout)), "--user-agent", APP_USER_AGENT,
-                "--header", "Accept: */*",
-            ]
-            if session_cookie:
-                command.extend(["--header", f"Cookie: session={session_cookie}"])
-            command.extend(["--output", str(temporary), url])
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 5)
-            if result.returncode == 0 and temporary.exists() and temporary.stat().st_size > 0:
-                os.replace(temporary, target)
-                return target
-            temporary.unlink(missing_ok=True)
-            curl_error = (result.stderr or result.stdout or "").strip() or str(result.returncode)
-        except (OSError, subprocess.SubprocessError) as exc:
-            temporary.unlink(missing_ok=True)
-            curl_error = str(exc)
-
-    try:
-        _wait_download_slot()
-        _browser_download(url, temporary, timeout, session_cookie=session_cookie)
-        os.replace(temporary, target)
-        return target
-    except Exception as browser_error:
-        temporary.unlink(missing_ok=True)
-        details = [f"Python: {python_error}"]
-        if curl_error:
-            details.append(f"curl: {curl_error}")
-        details.append(f"Chrome/Edge: {browser_error}")
-        raise DownloadError("파일 다운로드에 실패했습니다. " + " / ".join(details)) from browser_error
-
+        raise
 
 def _safe_target(root: Path, member_name: str) -> Path:
     normalized = member_name.replace("\\", "/")
