@@ -582,6 +582,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self.database = LocalRepository(data_dir() / "pawchive.sqlite3")
         self.workers: set[TaskThread] = set()
+        self.download_workers: set[TaskThread] = set()
         self.preview_creator: Creator | None = None
         self._build_ui()
         for browser in (self.following_browser, self.creator_browser, self.explore_browser):
@@ -736,6 +737,24 @@ class MainWindow(QMainWindow):
         worker.succeeded.connect(on_success)
         worker.failed.connect(self._task_failed)
         worker.finished.connect(lambda w=worker: self.workers.discard(w))
+        worker.start()
+
+    def _run_download_task(self, label: str, task: Callable[[], object],
+                           on_success: Callable[[object], None]) -> None:
+        active = [worker for worker in self.download_workers if worker.isRunning()]
+        if len(active) >= 3:
+            QMessageBox.information(
+                self, "다운로드 대기",
+                "동시에 진행할 수 있는 파일 다운로드는 최대 3개입니다. "
+                "하나가 끝나면 다시 시도해 주세요.",
+            )
+            return
+        self.status.setText(f"{label} · 동시 다운로드 {len(active) + 1}/3")
+        worker = TaskThread(task)
+        self.download_workers.add(worker)
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(self._task_failed)
+        worker.finished.connect(lambda current=worker: self.download_workers.discard(current))
         worker.start()
 
     def _task_failed(self, message: str) -> None:
