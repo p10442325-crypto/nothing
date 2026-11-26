@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from .models import Creator, Post
 
 DEFAULT_API = "https://pawchive.pw/api/v1"
-APP_USER_AGENT = "PawchiveModFinder/0.3 (+https://github.com/p10442325-crypto/nothing)"
+APP_USER_AGENT = "PawchiveModFinder/1.0 (+https://github.com/p10442325-crypto/nothing)"
 
 
 class PawchiveError(RuntimeError):
