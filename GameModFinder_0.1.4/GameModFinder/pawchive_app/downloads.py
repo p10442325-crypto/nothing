@@ -132,7 +132,9 @@ def resolve_thumbnail_url(path_or_url: str) -> str:
             if len([part for part in normalized.split("/") if part]) < 2:
                 raise DownloadError("Pawchive 이미지 경로 형식이 올바르지 않습니다.")
             thumb_path = "/thumbnail/data" + normalized
-    return "https://img.pawchive.pw" + quote(thumb_path, safe="/:@!$&()*+,;=-._~")
+    if chr(0) in thumb_path or any(part in {".", ".."} for part in thumb_path.split("/")):
+        raise DownloadError("안전하지 않은 Pawchive 이미지 경로입니다.")
+    return "https://img.pawchive.pw" + quote(thumb_path, safe="/:@!    return "https://img.pawchive.pw" + quote(thumb_path, safe="/:@!$&()*+,;=-._~")()*+,;=-._~")
 
 def download_file(
 '()*+,;=-._~')}"
