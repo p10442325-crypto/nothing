@@ -9,16 +9,16 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPushButton, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter, QTabWidget,
+    QPushButton, QPlainTextEdit, QTextBrowser, QProgressBar, QSpinBox, QSplitter, QTabWidget,
     QVBoxLayout, QWidget, QInputDialog,
 )
 
 from .api import PawchiveClient, PawchiveError
-from .downloads import DownloadError, download_file, safe_extract_archive
+from .downloads import DownloadError, download_file, resolve_file_url, safe_extract_archive
 from .models import Attachment, Creator, Post, parse_creator_url
 from .repository import LocalRepository
 
@@ -117,8 +117,8 @@ class PostBrowser(QWidget):
         self.meta = QLabel("")
         self.meta.setObjectName("Subtle")
         self.meta.setWordWrap(True)
-        self.content = QPlainTextEdit()
-        self.content.setReadOnly(True)
+        self.content = QTextBrowser()
+        self.content.setOpenExternalLinks(False)
         self.content.setPlaceholderText("게시물 본문이 여기에 표시됩니다.")
         self.files = QComboBox()
         self.download_button = QPushButton("선택한 파일 다운로드")
@@ -170,7 +170,7 @@ class PostBrowser(QWidget):
         self.current_post = post
         self.title.setText(post.title)
         self.meta.setText(f"{post.service} · 크리에이터 {post.creator_id} · 게시물 {post.post_id}\n게시일: {post.published or '정보 없음'}")
-        self.content.setPlainText(post.content or "(본문 없음)")
+        self.content.setMarkdown(post.content or "(본문 없음)")
         self.files.clear()
         for file in post.files:
             self.files.addItem(file.name or file.path, file)
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
                 for creator in creators:
                     service, creator_id = creator["service"], creator["creator_id"]
                     try:
-                        posts = client.creator_posts(service, creator_id, offset=0)
+                        posts = client.all_creator_posts(service, creator_id)
                         total += self.database.save_posts(posts)
                         self.database.update_sync_state(service, creator_id, 50, datetime.now().isoformat(), "")
                     except Exception as exc:
@@ -601,7 +601,7 @@ class MainWindow(QMainWindow):
 
         def task():
             with self._client() as client:
-                posts = client.recent_posts(query or None, offset=0)
+                posts = client.all_recent_posts(query or None)
             self.database.save_posts(posts)
             return posts
 
