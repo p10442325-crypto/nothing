@@ -26,7 +26,7 @@ class DesktopSmokeTests(unittest.TestCase):
         )
         self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
         self.assertTrue(hasattr(window.following_browser, "image_preview"))
-        self.assertTrue(hasattr(window.following_browser, "network"))
+        self.assertTrue(hasattr(window.following_browser, "_thumbnail_workers"))
         window.close()
 
 
