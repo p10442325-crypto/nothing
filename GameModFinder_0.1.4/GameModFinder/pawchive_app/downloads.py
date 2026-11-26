@@ -265,7 +265,9 @@ def _browser_download(
     )
 
 
-def fetch_thumbnail_bytes(url: str, timeout: int = 30) -> bytes:
+def fetch_thumbnail_bytes(
+    url: str, timeout: int = 30, session_cookie: str | None = None,
+) -> bytes:
     """Fetch and cache a Pawchive thumbnail through the browser transport."""
     global _THUMB_CACHE_SIZE
     parsed = urlsplit(url)
@@ -287,7 +289,7 @@ def fetch_thumbnail_bytes(url: str, timeout: int = 30) -> bytes:
         with tempfile.TemporaryDirectory(prefix="pawchive-thumb-") as directory:
             temporary = Path(directory) / "thumbnail.bin"
             _wait_download_slot()
-            _browser_download(url, temporary, timeout)
+            _browser_download(url, temporary, timeout, session_cookie=session_cookie)
             payload = temporary.read_bytes()
 
         if not payload or len(payload) > 16 * 1024 * 1024:
