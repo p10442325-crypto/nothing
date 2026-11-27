@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from .api import PawchiveClient, PawchiveError
 from .downloads import (DownloadError, download_file, download_mega_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
-from .models import Attachment, Creator, Post, parse_creator_url, post_matches_search_fields
+from .models import Attachment, Creator, Post, is_mega_file_url, parse_creator_url, post_matches_search_fields
 from .creator_discovery import (
     game_search_terms, load_game_catalog, parse_search_queries, scan_mod_creator_candidates,
 )
@@ -267,6 +267,7 @@ class PostBrowser(QWidget):
         # URL fragment contains a decryption key and needs the MEGA web client.
         return (
             attachment.kind == "external_link"
+            or is_mega_file_url(attachment.path)
             or cls._is_archive(attachment.name)
             or cls._is_archive(attachment.path)
         )
@@ -594,7 +595,7 @@ class PostBrowser(QWidget):
             card.setObjectName("AttachmentCard")
             row = QHBoxLayout(card)
             row.setContentsMargins(9, 7, 9, 7)
-            is_external = attachment.kind == "external_link"
+            is_external = attachment.kind == "external_link" or is_mega_file_url(attachment.path)
             icon = QLabel("🔗" if is_external else "📦")
             icon.setMinimumWidth(28)
             filename = QLabel(attachment.name or attachment.path.rsplit("/", 1)[-1])
@@ -1651,7 +1652,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.discover_page)
 
     def download_attachment(self, post: Post, attachment: Attachment) -> None:
-        is_mega_link = attachment.kind == "external_link"
+        is_mega_link = attachment.kind == "external_link" or is_mega_file_url(attachment.path)
         if is_mega_link:
             parsed = QUrl(attachment.path)
             allowed_hosts = {
