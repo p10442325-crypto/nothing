@@ -108,6 +108,8 @@ def scan_mod_creator_candidates(
     session_cookie: str | None = None,
     temporary_root: str | Path | None = None,
     progress: Callable[[str], None] | None = None,
+    game_key: str = "",
+    game_name: str = "",
 ) -> CreatorDiscoveryResult:
     """Search Pawchive pages, inspect archive listings, and persist creators backed by INI files.
 
@@ -196,12 +198,16 @@ def scan_mod_creator_candidates(
                             )
                             inspection = analyze_archive_for_ini(saved)
                         if inspection.ini_count:
-                            repository.save_mod_creator_evidence(
-                                post,
-                                attachment.name or safe_name,
-                                inspection.ini_files,
-                                inspection.ini_count,
-                            )
+                            if game_key:
+                                repository.save_mod_creator_evidence(
+                                    post, attachment.name or safe_name, inspection.ini_files,
+                                    inspection.ini_count, game_key=game_key, game_name=game_name,
+                                )
+                            else:
+                                repository.save_mod_creator_evidence(
+                                    post, attachment.name or safe_name,
+                                    inspection.ini_files, inspection.ini_count,
+                                )
                             positive_archives.add(archive_key)
                             positive_creators.add((post.service, post.creator_id))
                     except Exception as exc:
