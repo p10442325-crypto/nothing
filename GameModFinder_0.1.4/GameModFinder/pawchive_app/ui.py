@@ -1691,47 +1691,89 @@ class MainWindow(QMainWindow):
         def task(report_progress):
             resolved_attachment = attachment
             if not is_mega_link and (attachment.deferred or not attachment.path):
-                # Deferred Pawchive references deliberately omit their stable
-                # path. Resolve a fresh signed URL only when the user chooses
-                # to download that file, not while browsing the creator.
-                with self._client() as client:
-                    detail = client.post_detail(
-                        post.service, post.creator_id, post.post_id
+                # Deferred entries may only reveal their real link in the detail
+                # response. A MEGA URL can be returned after the first routing
+                # decision, so it must be classified again after this lookup.
+                try:
+                    with self._client() as client:
+                        detail = client.post_detail(
+                            post.service, post.creator_id, post.post_id
+                        )
+                    merged = dict(post.raw)
+                    merged.update(detail)
+                    merged.setdefault("id", post.post_id)
+                    merged.setdefault("service", post.service)
+                    merged.setdefault("user", post.creator_id)
+                    refreshed_post = Post.from_api(
+                        merged,
+                        Creator(service=post.service, creator_id=post.creator_id),
                     )
-                merged = dict(post.raw)
-                merged.update(detail)
-                merged.setdefault("id", post.post_id)
-                merged.setdefault("service", post.service)
-                merged.setdefault("user", post.creator_id)
-                refreshed_post = Post.from_api(
-                    merged,
-                    Creator(service=post.service, creator_id=post.creator_id),
-                )
-                self.database.save_posts([refreshed_post])
-                matches = [
-                    item for item in refreshed_post.files
-                    if item.name.casefold() == attachment.name.casefold()
-                    and item.path
-                ]
-                mega_matches = [
-                    item for item in refreshed_post.files
-                    if is_mega_file_url(item.path)
-                ]
-                if not matches and len(mega_matches) == 1:
-                    # Some detail responses expose the archived filename in
-                    # one field and the real MEGA URL as a separate link item.
-                    matches = mega_matches
-                if not matches and attachment.kind:
+                    self.database.save_posts([refreshed_post])
                     matches = [
                         item for item in refreshed_post.files
-                        if item.kind == attachment.kind and item.path
+                        if item.name.casefold() == attachment.name.casefold()
+                        and item.path
                     ]
-                if not matches:
-                    raise DownloadError(
-                        "Pawchive에서 이 첨부파일의 실제 다운로드 주소를 찾지 못했습니다. "
-                        "게시물의 Downloads 영역도 확인했지만 연결된 MEGA 주소가 없었습니다."
+                    mega_matches = [
+                        item for item in refreshed_post.files
+                        if is_mega_file_url(item.path)
+                    ]
+                    if not matches and len(mega_matches) == 1:
+                        # The post may expose the attachment name and its real
+                        # MEGA URL as separate metadata entries.
+                        matches = mega_matches
+                    if not matches and attachment.kind:
+                        matches = [
+                            item for item in refreshed_post.files
+                            if item.kind == attachment.kind and item.path
+                        ]
+                    if matches:
+                        resolved_attachment = matches[0]
+                except Exception:
+                    # The rendered post page can still contain a link even when
+                    # the JSON detail endpoint omits the file or fails.
+                    resolved_attachment = attachment
+
+            def download_mega(url: str):
+                def mega_progress(downloaded: int, total: int) -> None:
+                    report_progress(
+                        f"MEGA 다운로드 중… {downloaded / (1024 * 1024):.1f} / "
+                        f"{total / (1024 * 1024):.1f} MiB"
                     )
-                resolved_attachment = matches[0]
+                return download_mega_file(
+                    url, folder, progress_callback=mega_progress
+                )
+
+            def download_from_post_page(original_error: Exception):
+                report_progress("게시물의 Downloads 영역에서 실제 링크 확인 중…")
+                with self._client() as client:
+                    page_html = client.post_page_html(
+                        post.service, post.creator_id, post.post_id
+                    )
+                links = extract_mega_links_from_post_html(
+                    page_html, post.post_url
+                )
+                if not links:
+                    raise DownloadError(
+                        "게시물의 Downloads 영역에서 유효한 MEGA 파일 링크를 찾지 못했습니다. "
+                        "이 게시물의 페이지 HTML에도 MEGA 공개 링크가 없습니다."
+                    ) from original_error
+
+                wanted = " ".join((attachment.name or "").casefold().split())
+                matching = [
+                    item for item in links
+                    if wanted and wanted in " ".join((item[1] or "").casefold().split())
+                ]
+                if len(matching) == 1:
+                    mega_url = matching[0][0]
+                elif len(links) == 1:
+                    mega_url = links[0][0]
+                else:
+                    raise DownloadError(
+                        "게시물에 MEGA 다운로드 링크가 여러 개 있어 "
+                        "선택한 첨부파일과 일치하는 링크를 특정하지 못했습니다."
+                    ) from original_error
+                return download_mega(mega_url)
 
             resolved_mega_url = (
                 resolved_attachment.path
@@ -1742,13 +1784,10 @@ class MainWindow(QMainWindow):
                 else ""
             )
             if resolved_mega_url:
-                def mega_progress(downloaded: int, total: int) -> None:
-                    report_progress(
-                        f"MEGA 다운로드 중… {downloaded / (1024 * 1024):.1f} / "
-                        f"{total / (1024 * 1024):.1f} MiB"
-                    )
-                saved = download_mega_file(
-                    resolved_mega_url, folder, progress_callback=mega_progress
+                saved = download_mega(resolved_mega_url)
+            elif not resolved_attachment.path:
+                saved = download_from_post_page(
+                    DownloadError("API 응답에 다운로드 경로가 없습니다.")
                 )
             else:
                 try:
@@ -1760,48 +1799,9 @@ class MainWindow(QMainWindow):
                 except DownloadError as file_error:
                     if "Pawchive 파일 서버 주소가 아닙니다." not in str(file_error):
                         raise
-                    # The API can expose a placeholder/path while the actual
-                    # MEGA share is rendered in the post's Downloads section.
-                    # Resolve that page-only link at click time, then decrypt
-                    # and save the MEGA file inside this app.
-                    report_progress("게시물의 Downloads 영역에서 실제 링크 확인 중…")
-                    with self._client() as client:
-                        page_html = client.post_page_html(
-                            post.service, post.creator_id, post.post_id
-                        )
-                    links = extract_mega_links_from_post_html(
-                        page_html, post.post_url
-                    )
-                    if not links:
-                        raise DownloadError(
-                            "게시물의 Downloads 영역에서 유효한 MEGA 파일 링크를 찾지 못했습니다. "
-                            f"API 경로: {resolved_attachment.path}"
-                        ) from file_error
-
-                    wanted = " ".join((attachment.name or "").casefold().split())
-                    matching = [
-                        item for item in links
-                        if " ".join((item[1] or "").casefold().split()) == wanted
-                        and wanted
-                    ]
-                    if len(matching) == 1:
-                        mega_url = matching[0][0]
-                    elif len(links) == 1:
-                        mega_url = links[0][0]
-                    else:
-                        raise DownloadError(
-                            "게시물에 MEGA 다운로드 링크가 여러 개 있어 "
-                            "선택한 첨부파일과 일치하는 링크를 특정하지 못했습니다."
-                        ) from file_error
-
-                    def mega_progress(downloaded: int, total: int) -> None:
-                        report_progress(
-                            f"MEGA 다운로드 중… {downloaded / (1024 * 1024):.1f} / "
-                            f"{total / (1024 * 1024):.1f} MiB"
-                        )
-                    saved = download_mega_file(
-                        mega_url, folder, progress_callback=mega_progress
-                    )
+                    # Pawchive sometimes renders the external share only in its
+                    # Downloads HTML section, not as an API attachment field.
+                    saved = download_from_post_page(file_error)
 
             extracted = []
             try:
