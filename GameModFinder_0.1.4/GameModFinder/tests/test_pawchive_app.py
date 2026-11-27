@@ -52,6 +52,34 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(post.key, "fanbox:1234:88")
         self.assertEqual([item.name for item in post.files], ["main.zip", "preview.png"])
 
+    def test_post_preserves_pathless_deferred_rar_reference(self):
+        post = Post.from_api({
+            "id": "deferred-rar", "service": "fanbox", "user": "1234",
+            "title": "Deferred RAR",
+            "attachments": [
+                {"name": "character-pack.rar", "path": None, "deferred": True}
+            ],
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "character-pack.rar")
+        self.assertEqual(post.files[0].path, "")
+        self.assertTrue(post.files[0].deferred)
+
+    def test_post_parses_temp_download_url(self):
+        post = Post.from_api({
+            "id": "temp-url", "service": "fanbox", "user": "1234",
+            "file": {
+                "name": "main.rar",
+                "temp_download_url": "https://file.pawchive.pw/data/aa/temp",
+                "deferred": True,
+            },
+        })
+        self.assertEqual(
+            post.files[0].path,
+            "https://file.pawchive.pw/data/aa/temp",
+        )
+        self.assertTrue(post.files[0].deferred)
+
     def test_post_parses_rar_file_from_string_and_query_filename(self):
         post = Post.from_api({
             "id": "89", "service": "fanbox", "user": "1234",
@@ -160,6 +188,9 @@ class ApiTests(unittest.TestCase):
         partial = Post.from_api({
             "id": "rar-post", "service": "fanbox", "user": "creator-1",
             "title": "RAR attachment post",
+            "attachments": [
+                {"name": "character-pack.rar", "path": None, "deferred": True}
+            ],
         })
         detail = {
             "id": "rar-post",
@@ -172,27 +203,52 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(completed[0].files[0].name, "character-pack.rar")
         fetch.assert_called_once_with("fanbox", "creator-1", "rar-post")
 
-    def test_complete_post_metadata_expands_posts_with_only_image_previews(self):
-        summary = Post.from_api({
-            "id": "rar-hidden", "service": "fanbox", "user": "creator-1",
+    def test_complete_post_metadata_does_not_expand_regular_image_posts(self):
+        image_only = Post.from_api({
+            "id": "image-only", "service": "fanbox", "user": "creator-1",
             "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
             "attachments": [],
         })
+        with patch.object(PawchiveClient, "post_detail") as fetch:
+            client = PawchiveClient()
+            result = client.complete_post_metadata([image_only])
+        self.assertEqual(result, [image_only])
+        self.assertEqual(client.last_detail_failures, 0)
+        fetch.assert_not_called()
+
+    def test_complete_post_metadata_expands_only_pathless_deferred_archives(self):
+        summary = Post.from_api({
+            "id": "rar-hidden", "service": "fanbox", "user": "creator-1",
+            "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
+            "attachments": [
+                {"name": "hidden-mod.rar", "deferred": True},
+            ],
+        })
         detail = {
             "id": "rar-hidden",
-            "file": {"filename": "hidden-mod.rar", "temp_url": "/data/ab/temp"},
-            "attachments": [],
-            "inline": [],
+            "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
+            "attachments": [{
+                "name": "hidden-mod.rar",
+                "temp_download_url": "https://file.pawchive.pw/data/ab/temp",
+                "deferred": True,
+            }],
         }
         with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
             result = PawchiveClient().complete_post_metadata([summary])
-        self.assertEqual(result[0].files[0].name, "hidden-mod.rar")
+        self.assertEqual(result[0].files[1].name, "hidden-mod.rar")
+        self.assertEqual(
+            result[0].files[1].path,
+            "https://file.pawchive.pw/data/ab/temp",
+        )
         fetch.assert_called_once_with("fanbox", "creator-1", "rar-hidden")
 
     def test_complete_post_metadata_keeps_post_when_detail_fails(self):
         partial = Post.from_api({
             "id": "no-detail", "service": "fanbox", "user": "creator-1",
-            "title": "Still show the post",
+            "title": "Still show the deferred RAR post",
+            "attachments": [
+                {"name": "missing-link.rar", "deferred": True}
+            ],
         })
         with patch.object(PawchiveClient, "post_detail", side_effect=RuntimeError("temporary")):
             client = PawchiveClient()
