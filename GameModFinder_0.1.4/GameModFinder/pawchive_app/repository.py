@@ -311,7 +311,7 @@ class LocalRepository:
                 LEFT JOIN creators c
                     ON c.service=e.service AND c.creator_id=e.creator_id
                 GROUP BY e.service, e.creator_id
-                ORDER BY last_scanned DESC
+                ORDER BY evidence_count DESC, last_scanned DESC, e.service, e.creator_id
                 """
             ).fetchall()
             return [dict(row) for row in rows]
