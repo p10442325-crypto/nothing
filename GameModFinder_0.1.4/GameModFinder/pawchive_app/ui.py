@@ -801,7 +801,7 @@ class MainWindow(QMainWindow):
         following_layout.addLayout(top)
         self.following_browser = PostBrowser()
         self.following_browser.download_requested.connect(self.download_attachment)
-                following_layout.addWidget(self.following_browser, 1)
+        following_layout.addWidget(self.following_browser, 1)
         self.tabs.addTab(following_page, "팔로잉")
 
         # Creators
