@@ -130,6 +130,28 @@ class ModelTests(unittest.TestCase):
         )
         self.assertEqual(post.files[0].path, "https://file.pawchive.pw/data/ab/temp?id=91")
 
+    def test_post_parses_mega_file_anchor_without_archive_filename(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "101845109", "service": "patreon", "user": "124138802",
+            "title": "MEGA download post",
+            "content": f'<p><a href="{url}">Download</a></p>',
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].kind, "external_link")
+        self.assertEqual(post.files[0].path, url)
+        self.assertEqual(post.files[0].name, "MEGA 외부 파일 링크")
+
+    def test_post_parses_plain_text_mega_file_link(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "plain-mega", "service": "patreon", "user": "124138802",
+            "content": f"Download: {url}",
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].kind, "external_link")
+        self.assertEqual(post.files[0].path, url)
+
     def test_post_parses_archive_link_from_html_content(self):
         post = Post.from_api({
             "id": "92", "service": "fanbox", "user": "1234",
