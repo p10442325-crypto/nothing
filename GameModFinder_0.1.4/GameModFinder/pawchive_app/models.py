@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import html
+from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import re
 
 
@@ -63,6 +64,85 @@ def find_mega_file_url(value: Any) -> str:
             if is_mega_file_url(candidate):
                 return candidate
     return ""
+
+
+def extract_mega_links_from_post_html(document: str, page_url: str) -> list[tuple[str, str]]:
+    """Extract MEGA links shown in a Pawchive post's Downloads section.
+
+    The public post page can render outbound links that are absent from the
+    JSON API payload. This mirrors the page's visible Downloads section and
+    falls back to explicit MEGA URLs in the HTML when the section is omitted.
+    """
+    class DownloadSectionParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.in_heading = False
+            self.heading_tag = ""
+            self.heading_text: list[str] = []
+            self.in_downloads = False
+            self.anchor: dict[str, Any] | None = None
+            self.links: list[tuple[str, str]] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            lowered = tag.lower()
+            if lowered in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                self.in_downloads = False
+                self.in_heading = True
+                self.heading_tag = lowered
+                self.heading_text = []
+            if lowered == "a":
+                values = {key.lower(): value or "" for key, value in attrs}
+                self.anchor = {
+                    "href": values.get("href", ""),
+                    "label": [],
+                    "download": values.get("download", ""),
+                    "title": values.get("title", ""),
+                }
+
+        def handle_data(self, data: str) -> None:
+            if self.in_heading:
+                self.heading_text.append(data)
+            if self.anchor is not None:
+                self.anchor["label"].append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            lowered = tag.lower()
+            if self.in_heading and lowered == self.heading_tag:
+                heading = " ".join(" ".join(self.heading_text).split()).casefold()
+                self.in_downloads = heading == "downloads"
+                self.in_heading = False
+                self.heading_tag = ""
+                self.heading_text = []
+            if lowered == "a" and self.anchor is not None:
+                if self.in_downloads:
+                    href = html.unescape(str(self.anchor.get("href", "")).strip())
+                    label = " ".join(" ".join(self.anchor.get("label", [])).split())
+                    label = label or str(self.anchor.get("download", "")).strip()
+                    label = label or str(self.anchor.get("title", "")).strip()
+                    absolute = urljoin(page_url, href)
+                    if href and is_mega_file_url(absolute):
+                        self.links.append((absolute, label))
+                self.anchor = None
+
+    parser = DownloadSectionParser()
+    parser.feed(document or "")
+    parser.close()
+    links = parser.links
+
+    # Some post templates contain the external link in body HTML but no
+    # explicit Downloads heading. Only accept syntactically valid MEGA file
+    # URLs; ignore arbitrary page links and malformed hosts.
+    if not links:
+        for match in re.findall(
+            r"""https://(?:www[.])?mega(?:[.]nz|[.]co[.]nz)/[^\s"<>]+""",
+            html.unescape(document or ""),
+            flags=re.I,
+        ):
+            url = match.rstrip(".,);]")
+            if is_mega_file_url(url) and all(existing[0] != url for existing in links):
+                links.append((url, ""))
+
+    return links
 
 
 @dataclass(frozen=True, slots=True)
