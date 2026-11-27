@@ -79,11 +79,20 @@ class LocalRepository:
                     ini_count INTEGER NOT NULL DEFAULT 0,
                     ini_files_json TEXT NOT NULL DEFAULT '[]',
                     scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    game_key TEXT NOT NULL DEFAULT '',
+                    game_name TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (service, creator_id, post_id, archive_name)
                 );
                 """
             )
-            db.execute("PRAGMA user_version = 1")
+            evidence_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(mod_creator_evidence)")
+            }
+            if "game_key" not in evidence_columns:
+                db.execute("ALTER TABLE mod_creator_evidence ADD COLUMN game_key TEXT NOT NULL DEFAULT ''")
+            if "game_name" not in evidence_columns:
+                db.execute("ALTER TABLE mod_creator_evidence ADD COLUMN game_name TEXT NOT NULL DEFAULT ''")
+            db.execute("PRAGMA user_version = 2")
 
     def save_creator(self, creator: Creator) -> None:
         with self._connect() as db:
@@ -240,6 +249,7 @@ class LocalRepository:
         archive_name: str,
         ini_files: Iterable[str],
         ini_count: int | None = None,
+        *, game_key: str = "", game_name: str = "",
     ) -> None:
         paths = [str(value) for value in ini_files]
         if not paths:
@@ -258,23 +268,25 @@ class LocalRepository:
                 """
                 INSERT INTO mod_creator_evidence(
                     service, creator_id, post_id, post_title, archive_name,
-                    ini_count, ini_files_json, scanned_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ini_count, ini_files_json, scanned_at, game_key, game_name
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
                 ON CONFLICT(service, creator_id, post_id, archive_name)
                 DO UPDATE SET
                     post_title=excluded.post_title,
                     ini_count=excluded.ini_count,
                     ini_files_json=excluded.ini_files_json,
+                    game_key=excluded.game_key,
+                    game_name=excluded.game_name,
                     scanned_at=CURRENT_TIMESTAMP
                 """,
                 (
                     post.service, post.creator_id, post.post_id, post.title,
                     archive_name, count,
-                    json.dumps(paths, ensure_ascii=False),
+                    json.dumps(paths, ensure_ascii=False), game_key, game_name,
                 ),
             )
 
-    def mod_creator_candidates(self) -> list[dict]:
+    def mod_creator_candidates(self, game_key: str | None = None) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
                 """
@@ -310,9 +322,10 @@ class LocalRepository:
                 FROM mod_creator_evidence e
                 LEFT JOIN creators c
                     ON c.service=e.service AND c.creator_id=e.creator_id
+                WHERE (? IS NULL OR e.game_key=?)
                 GROUP BY e.service, e.creator_id
                 ORDER BY evidence_count DESC, last_scanned DESC, e.service, e.creator_id
-                """
+                """, (game_key, game_key)
             ).fetchall()
             return [dict(row) for row in rows]
 
