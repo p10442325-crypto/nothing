@@ -15,6 +15,23 @@ def _string(value: Any) -> str:
     return ""
 
 
+def is_mega_file_url(value: str) -> bool:
+    """Return True only for HTTPS MEGA public-file share URLs."""
+    parsed = urlparse(_string(value).strip())
+    host = (parsed.hostname or "").lower()
+    allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
+    modern_file = re.fullmatch(r"/file/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None
+    legacy_file = host.endswith("mega.co.nz") and parsed.path in {"", "/"} and parsed.fragment.startswith("!")
+    return (
+        parsed.scheme.lower() == "https"
+        and host in allowed_hosts
+        and parsed.username is None
+        and parsed.password is None
+        and bool(parsed.fragment)
+        and (modern_file or legacy_file)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Attachment:
     name: str
@@ -146,6 +163,16 @@ class Post:
             attachment = Attachment.from_api(item, kind)
             if not attachment:
                 return
+            # Some Pawchive responses put outbound MEGA URLs directly into
+            # attachments/files/inline. Normalize by URL, not the source field,
+            # so the download button always uses MEGA decryption.
+            if attachment.kind != "external_link" and is_mega_file_url(attachment.path):
+                attachment = Attachment(
+                    name=attachment.name or "MEGA 외부 파일 링크",
+                    path=attachment.path,
+                    kind="external_link",
+                    deferred=attachment.deferred,
+                )
             if attachment.path:
                 duplicate = any(
                     entry.path and entry.path == attachment.path
