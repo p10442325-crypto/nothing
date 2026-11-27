@@ -173,7 +173,7 @@ class Post:
             ".tgz", ".tbz2", ".txz",
         )
         anchor_pattern = re.compile(
-            r"""<a\\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""",
+            r"""<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""",
             flags=re.I | re.S,
         )
         for href, label in anchor_pattern.findall(_string(value.get("content"))):
