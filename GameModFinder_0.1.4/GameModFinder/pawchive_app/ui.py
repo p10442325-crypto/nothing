@@ -21,6 +21,7 @@ from .api import PawchiveClient, PawchiveError
 from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url
 from .repository import LocalRepository
+from .updater import UpdateCheck, UpdateError, UpdateManager, UpdatePackage
 
 
 APP_STYLE = """
@@ -607,6 +608,8 @@ class PostBrowser(QWidget):
 
 class SettingsPage(QWidget):
     changed = Signal()
+    check_updates_requested = Signal()
+    apply_update_requested = Signal()
 
     def __init__(self, settings: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -656,6 +659,33 @@ class SettingsPage(QWidget):
         save.setObjectName("Primary")
         save.clicked.connect(self._save)
         layout.addWidget(save)
+
+        update_panel = QFrame()
+        update_panel.setObjectName("Panel")
+        update_layout = QVBoxLayout(update_panel)
+        update_title = QLabel("프로그램 업데이트")
+        update_title.setObjectName("Section")
+        update_layout.addWidget(update_title)
+        self.update_status = QLabel("업데이트 확인 전")
+        self.update_status.setObjectName("Subtle")
+        self.update_status.setWordWrap(True)
+        update_layout.addWidget(self.update_status)
+        update_buttons = QHBoxLayout()
+        self.check_updates_button = QPushButton("업데이트 확인")
+        self.check_updates_button.clicked.connect(
+            lambda: self.check_updates_requested.emit()
+        )
+        self.apply_update_button = QPushButton("업데이트 적용 후 재시작")
+        self.apply_update_button.setObjectName("Primary")
+        self.apply_update_button.setEnabled(False)
+        self.apply_update_button.hide()
+        self.apply_update_button.clicked.connect(
+            lambda: self.apply_update_requested.emit()
+        )
+        update_buttons.addWidget(self.check_updates_button)
+        update_buttons.addWidget(self.apply_update_button)
+        update_layout.addLayout(update_buttons)
+        layout.addWidget(update_panel)
         self._refresh_game_list()
 
     def _browse(self, field: QLineEdit) -> None:
@@ -709,6 +739,12 @@ class MainWindow(QMainWindow):
         self._creator_tag_owner: tuple[str, str] | None = None
         self._creator_tag_request: tuple[str, str] | None = None
         self._creator_tag_workers: set[TaskThread] = set()
+        self._available_update: UpdateCheck | None = None
+        self._prepared_update: UpdatePackage | None = None
+        self.update_manager = UpdateManager(
+            data_dir(),
+            Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home())
+        )
         self._explore_query_active = ""
         self._explore_next_offset = 0
         self._explore_has_more = False
@@ -854,6 +890,8 @@ class MainWindow(QMainWindow):
         # Settings
         self.settings_page = SettingsPage(self.settings)
         self.settings_page.changed.connect(self._settings_changed)
+        self.settings_page.check_updates_requested.connect(self.check_for_updates)
+        self.settings_page.apply_update_requested.connect(self.prepare_and_apply_update)
         self.tabs.addTab(self.settings_page, "설정")
         self._refresh_download_history()
 
@@ -1266,6 +1304,143 @@ class MainWindow(QMainWindow):
         folder = Path(self.settings.get("download_dir", "")).expanduser()
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _has_active_app_tasks(self) -> bool:
+        active = list(self.workers) + list(self.download_workers) + list(self._creator_tag_workers)
+        for browser in (
+            getattr(self, "following_browser", None),
+            getattr(self, "creator_browser", None),
+            getattr(self, "explore_browser", None),
+        ):
+            if browser is not None:
+                active.extend(getattr(browser, "_thumbnail_workers", set()))
+        return any(worker.isRunning() for worker in active)
+
+    def check_for_updates(self) -> None:
+        if self._has_active_app_tasks():
+            QMessageBox.information(
+                self, "작업 진행 중",
+                "다운로드나 게시물 불러오기가 끝난 뒤 업데이트를 확인해 주세요."
+            )
+            return
+        page = self.settings_page
+        page.check_updates_button.setEnabled(False)
+        page.apply_update_button.hide()
+        page.apply_update_button.setEnabled(False)
+        page.update_status.setText("GitHub에서 최신 버전 확인 중…")
+        self._available_update = None
+        self._prepared_update = None
+
+        def done(result: UpdateCheck) -> None:
+            page.check_updates_button.setEnabled(True)
+            self._available_update = result
+            if result.available:
+                page.update_status.setText(
+                    "새 버전을 찾았습니다. 업데이트 파일을 내려받아 적용할 수 있습니다.\n"
+                    f"현재: {result.installed_commit[:10]} · 최신: {result.latest_commit[:10]}"
+                )
+                page.apply_update_button.setText("업데이트 파일 받기")
+                page.apply_update_button.setEnabled(True)
+                page.apply_update_button.show()
+                self.status.setText("새 업데이트 확인")
+            else:
+                page.update_status.setText(
+                    f"최신 버전입니다. ({result.latest_commit[:10]})"
+                )
+                self.status.setText("최신 버전 사용 중")
+
+        def failed(message: str) -> None:
+            page.check_updates_button.setEnabled(True)
+            page.update_status.setText("업데이트 확인 실패: " + message)
+            self.status.setText("업데이트 확인 실패")
+
+        self._run_task(
+            "GitHub 업데이트 확인 중…",
+            self.update_manager.check,
+            done,
+            failed,
+        )
+
+    def prepare_and_apply_update(self) -> None:
+        if self._prepared_update is not None:
+            self._apply_prepared_update()
+            return
+        if self._available_update is None or not self._available_update.available:
+            self.check_for_updates()
+            return
+        if self._has_active_app_tasks():
+            QMessageBox.information(
+                self, "작업 진행 중",
+                "다운로드나 게시물 불러오기가 끝난 뒤 업데이트를 적용해 주세요."
+            )
+            return
+
+        page = self.settings_page
+        page.apply_update_button.setEnabled(False)
+        page.check_updates_button.setEnabled(False)
+        page.update_status.setText("업데이트 파일 다운로드 및 안전성 확인 중…")
+        commit = self._available_update.latest_commit
+
+        def done(package: UpdatePackage) -> None:
+            self._prepared_update = package
+            page.check_updates_button.setEnabled(True)
+            page.update_status.setText(
+                "업데이트 파일을 준비했습니다. 적용하면 앱이 종료된 뒤 파일을 교체하고 다시 실행됩니다.\n"
+                f"대상 버전: {package.commit[:10]}"
+            )
+            page.apply_update_button.setText("업데이트 적용 후 재시작")
+            page.apply_update_button.setEnabled(True)
+            page.apply_update_button.show()
+            self.status.setText("업데이트 준비 완료")
+
+        def failed(message: str) -> None:
+            page.check_updates_button.setEnabled(True)
+            page.apply_update_button.setText("업데이트 파일 받기")
+            page.apply_update_button.setEnabled(True)
+            page.update_status.setText("업데이트 다운로드 실패: " + message)
+            self.status.setText("업데이트 다운로드 실패")
+
+        self._run_task(
+            "GitHub 업데이트 다운로드 중…",
+            lambda: self.update_manager.prepare(commit),
+            done,
+            failed,
+        )
+
+    def _apply_prepared_update(self) -> None:
+        package = self._prepared_update
+        if package is None:
+            return
+        if self._has_active_app_tasks():
+            QMessageBox.information(
+                self, "작업 진행 중",
+                "진행 중인 다운로드나 게시물 작업이 끝난 뒤 다시 적용해 주세요."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "업데이트 적용",
+            "앱을 종료하고 업데이트를 적용한 다음 자동으로 다시 실행합니다.\n"
+            "설정과 다운로드 기록은 유지됩니다. 지금 재시작할까요?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            app_root = Path(__file__).resolve().parent.parent
+            self.update_manager.launch_after_exit(package, app_root, os.getpid())
+        except UpdateError as exc:
+            QMessageBox.warning(self, "업데이트 시작 실패", str(exc))
+            return
+
+        self.settings_page.apply_update_button.setEnabled(False)
+        self.settings_page.check_updates_button.setEnabled(False)
+        self.settings_page.update_status.setText(
+            "앱을 닫으면 업데이트를 적용하고 다시 실행합니다."
+        )
+        QApplication.quit()
 
     def _settings_changed(self) -> None:
         self.settings = self.settings_page.settings
