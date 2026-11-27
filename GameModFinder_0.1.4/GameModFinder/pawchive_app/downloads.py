@@ -653,11 +653,11 @@ def download_mega_file(
         "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
         "mega.io", "www.mega.io",
     }
-    match = re.fullmatch(r"/(?:file|embed)/([A-Za-z0-9_-]{8})/?", parsed.path or "")
+    match = re.fullmatch(r"/(?:file|embed)/([A-Za-z0-9_-]{8,64})/?", parsed.path or "")
     file_key_text = unquote(parsed.fragment or "")
     legacy_match = (
-        re.fullmatch(r"!([A-Za-z0-9_-]{8})!([A-Za-z0-9_-]{43,44})", file_key_text)
-        if host in {"mega.co.nz", "www.mega.co.nz"} and parsed.path in {"", "/"}
+        re.fullmatch(r"!([A-Za-z0-9_-]{8,64})!([A-Za-z0-9_-]{43,44})", file_key_text)
+        if host in {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"} and parsed.path in {"", "/"}
         else None
     )
     if (
