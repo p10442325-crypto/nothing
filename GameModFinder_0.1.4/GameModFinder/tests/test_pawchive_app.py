@@ -670,6 +670,16 @@ class MegaCdnHostTests(unittest.TestCase):
         with self.assertRaisesRegex(DownloadError, "CloudRAID"):
             _single_mega_download_url([url, url])
 
+    def test_mega_server_diagnostic_only_exposes_scheme_and_host(self):
+        from pawchive_app.downloads import _mega_download_server_identity
+
+        self.assertEqual(
+            _mega_download_server_identity(
+                "https://cdn.example/file?token=secret#private"
+            ),
+            "scheme=https, host=cdn.example",
+        )
+
     def test_trusted_mega_download_hosts(self):
         from pawchive_app.downloads import _is_trusted_mega_download_url as ok
 
