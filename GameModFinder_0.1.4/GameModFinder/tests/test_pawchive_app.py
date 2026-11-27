@@ -119,7 +119,6 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(creators[0].name, "Browser Fallback")
         mock_browser.assert_called_once()
 
-    @patch("pawchive_app.api.urlopen")
     def test_post_detail_unwraps_nested_data_post(self):
         client = PawchiveClient()
         detail = {
@@ -158,6 +157,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(completed, [partial])
         self.assertEqual(client.last_detail_failures, 1)
 
+    @patch("pawchive_app.api.urlopen")
     def test_creator_post_route_and_offset(self, mock_urlopen):
         mock_urlopen.return_value = FakeResponse(json.dumps([
             {"id": "88", "service": "fanbox", "user": "1234", "title": "One"}
