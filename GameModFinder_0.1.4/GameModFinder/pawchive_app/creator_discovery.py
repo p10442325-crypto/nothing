@@ -16,6 +16,7 @@ ARCHIVE_SUFFIXES = (
     ".tgz", ".tbz2", ".txz", ".tar.gz", ".tar.bz2", ".tar.xz",
 )
 MAX_SEARCH_PAGES = 20
+MAX_SEARCH_QUERIES = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,8 @@ def scan_mod_creator_candidates(
             normalized_queries.append(normalized)
     if not normalized_queries:
         raise ValueError("검색어를 하나 이상 입력해 주세요.")
+    if len(normalized_queries) > MAX_SEARCH_QUERIES:
+        raise ValueError(f"검색어는 한 번에 최대 {MAX_SEARCH_QUERIES}개까지 입력할 수 있습니다.")
     if not include_title and not include_content:
         raise ValueError("제목 또는 내용을 검색 범위로 선택해 주세요.")
 
