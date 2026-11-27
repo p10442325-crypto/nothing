@@ -1135,6 +1135,7 @@ class MainWindow(QMainWindow):
                     service, creator_id = creator["service"], creator["creator_id"]
                     try:
                         posts = client.all_creator_posts(service, creator_id)
+                        posts = client.complete_post_metadata(posts)
                         total += self.database.save_posts(posts)
                         self.database.update_sync_state(service, creator_id, len(posts), datetime.now().isoformat(), "")
                     except Exception as exc:
@@ -1222,6 +1223,7 @@ class MainWindow(QMainWindow):
         def task():
             with self._client() as client:
                 posts = client.all_creator_posts(service, creator_id, tag=tag)
+                posts = client.complete_post_metadata(posts)
             self.database.save_posts(posts)
             return posts
 
@@ -1243,6 +1245,7 @@ class MainWindow(QMainWindow):
         def task():
             with self._client() as client:
                 posts = client.all_creator_posts(service, creator_id)
+                posts = client.complete_post_metadata(posts)
             self.database.save_posts(posts)
             self.database.update_sync_state(service, creator_id, len(posts), datetime.now().isoformat(), "")
             return posts
@@ -1333,6 +1336,7 @@ class MainWindow(QMainWindow):
         def task():
             with self._client() as client:
                 raw_posts = client.recent_posts(query or None, offset=0)
+                raw_posts = client.complete_post_metadata(raw_posts)
             self.database.save_posts(raw_posts)
             visible_posts = [
                 post for post in raw_posts
@@ -1388,6 +1392,7 @@ class MainWindow(QMainWindow):
         def task():
             with self._client() as client:
                 raw_posts = client.recent_posts(query or None, offset=offset)
+                raw_posts = client.complete_post_metadata(raw_posts)
             self.database.save_posts(raw_posts)
             visible_posts = [
                 post for post in raw_posts
