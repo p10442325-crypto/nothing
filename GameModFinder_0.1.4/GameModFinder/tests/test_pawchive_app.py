@@ -143,6 +143,23 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(post.files[0].path, url)
         self.assertEqual(post.files[0].kind, "external_link")
 
+    def test_post_prefers_mega_url_over_pawchive_path_in_attachment(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "mega-url-and-path",
+            "service": "patreon",
+            "user": "124138802",
+            "attachments": [{
+                "name": "sample-pack.rar",
+                "path": "/data/ab/sample-pack.rar",
+                "url": url,
+            }],
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "sample-pack.rar")
+        self.assertEqual(post.files[0].path, url)
+        self.assertEqual(post.files[0].kind, "external_link")
+
     def test_post_parses_mega_file_anchor_without_archive_filename(self):
         url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
         post = Post.from_api({
