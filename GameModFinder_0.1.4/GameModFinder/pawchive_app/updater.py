@@ -285,9 +285,17 @@ def wait_for_parent(pid):
     kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
     kernel32.WaitForSingleObject.restype = ctypes.c_ulong
     kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    if pid <= 0:
+        raise ValueError("The app process ID must be a positive integer.")
     handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
     if not handle:
         error = ctypes.get_last_error()
+        # The detached helper may start after the GUI has already exited.
+        # ERROR_INVALID_PARAMETER (87) means this PID no longer identifies
+        # a live process, so there is nothing left to wait for.
+        if error == 87:
+            log(f"App process {pid} has already exited; continuing update.")
+            return
         raise OSError(error, "Could not open the app process")
     try:
         result = kernel32.WaitForSingleObject(handle, 180000)
