@@ -19,6 +19,7 @@ from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file
 from pawchive_app.enhancements import pawchive_image_url
 from pawchive_app.models import Creator, Post, parse_creator_url
 from pawchive_app.repository import LocalRepository
+from pawchive_app.updater import BASELINE_COMMIT, UpdateManager, _APPLY_HELPER
 
 
 class FakeResponse(io.BytesIO):
@@ -503,6 +504,90 @@ class DownloadSafetyTests(unittest.TestCase):
             with self.assertRaises(DownloadError):
                 safe_extract_archive(archive, Path(tmp) / "out")
             self.assertFalse((Path(tmp) / "escape.txt").exists())
+
+
+class UpdaterTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.manager = UpdateManager(root / "roaming", root / "local")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _make_archive(self, extra_entries=None):
+        prefix = "nothing-feature/GameModFinder_0.1.4/GameModFinder/"
+        files = {
+            "main_v2.py": "print('app')",
+            "run.bat": "@echo off",
+            "requirements.txt": "PySide6",
+            "pawchive_app/ui.py": "# ui",
+            "pawchive_app/updater.py": "# updater",
+        }
+        if extra_entries:
+            files.update(extra_entries)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, text in files.items():
+                archive.writestr(prefix + name, text)
+        return buffer.getvalue()
+
+    def test_check_detects_new_branch_commit(self):
+        latest = "a" * 40
+        with patch.object(
+            self.manager,
+            "_request_bytes",
+            return_value=json.dumps({"sha": latest}).encode("utf-8"),
+        ) as request:
+            result = self.manager.check()
+        self.assertEqual(result.installed_commit, BASELINE_COMMIT)
+        self.assertEqual(result.latest_commit, latest)
+        self.assertTrue(result.available)
+        self.assertIn("feature%2Fpawchive-mod-finder-v2", request.call_args.args[0])
+
+    def test_check_reports_up_to_date_after_commit_marker_is_written(self):
+        latest = "b" * 40
+        self.manager.installed_commit_path.write_text(latest, encoding="ascii")
+        with patch.object(
+            self.manager,
+            "_request_bytes",
+            return_value=json.dumps({"sha": latest}).encode("utf-8"),
+        ):
+            result = self.manager.check()
+        self.assertFalse(result.available)
+
+    def test_check_rejects_invalid_github_response(self):
+        with patch.object(
+            self.manager, "_request_bytes", return_value=b'{"sha":"not-a-sha"}'
+        ):
+            with self.assertRaisesRegex(RuntimeError, "올바른 업데이트 버전"):
+                self.manager.check()
+
+    def test_prepare_extracts_only_the_app_folder(self):
+        payload = self._make_archive({"tests/test_example.py": "pass"})
+        with patch.object(self.manager, "_request_bytes", return_value=payload):
+            package = self.manager.prepare("c" * 40)
+        self.assertTrue((package.staged_app / "main_v2.py").is_file())
+        self.assertTrue((package.staged_app / "pawchive_app" / "updater.py").is_file())
+        self.assertTrue((package.staged_app / "tests" / "test_example.py").is_file())
+        self.assertFalse((package.staged_app.parent / "outside.txt").exists())
+
+    def test_prepare_rejects_path_traversal(self):
+        payload = self._make_archive({"../outside.txt": "not allowed"})
+        with patch.object(self.manager, "_request_bytes", return_value=payload):
+            with self.assertRaisesRegex(RuntimeError, "안전하지 않은 파일 경로"):
+                self.manager.prepare("d" * 40)
+
+    def test_prepare_rejects_unexpected_archive_layout(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("wrong-root/main_v2.py", "print('no')")
+        with patch.object(self.manager, "_request_bytes", return_value=buffer.getvalue()):
+            with self.assertRaisesRegex(RuntimeError, "GameModFinder 폴더"):
+                self.manager.prepare("e" * 40)
+
+    def test_windows_update_helper_is_valid_python(self):
+        compile(_APPLY_HELPER, "apply_update.py", "exec")
 
 
 if __name__ == "__main__":
