@@ -20,8 +20,8 @@ def is_mega_file_url(value: str) -> bool:
     """Return True only for HTTPS MEGA public-file share URLs."""
     parsed = urlparse(_string(value).strip())
     host = (parsed.hostname or "").lower()
-    allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
-    modern_file = re.fullmatch(r"/file/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None
+    allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io"}
+    modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None
     legacy_file = host.endswith("mega.co.nz") and parsed.path in {"", "/"} and parsed.fragment.startswith("!")
     return (
         parsed.scheme.lower() == "https"
@@ -56,7 +56,7 @@ def find_mega_file_url(value: Any) -> str:
         # Some APIs put the URL inside descriptive text or HTML rather than
         # returning a dedicated URL property.
         for match in re.findall(
-            r"""https://(?:www[.])?mega(?:[.]nz|[.]co[.]nz)/[^\s"<>]+""",
+            r"""https://(?:www[.])?mega(?:[.]nz|[.]co[.]nz|[.]io)/(?:file|embed)/[^\s"<>]+""",
             html.unescape(value),
             flags=re.I,
         ):
@@ -342,9 +342,9 @@ class Post:
             parsed = urlparse(clean_url)
             host = (parsed.hostname or "").lower()
             mega_host = host in {
-                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io",
             }
-            modern_file = parsed.path.startswith("/file/") and bool(parsed.fragment)
+            modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None and bool(parsed.fragment)
             legacy_file = (
                 host.endswith("mega.co.nz")
                 and parsed.path in {"", "/"}
