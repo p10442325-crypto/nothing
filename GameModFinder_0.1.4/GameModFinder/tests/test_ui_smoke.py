@@ -78,13 +78,22 @@ class DesktopSmokeTests(unittest.TestCase):
                 {"name": "readme.txt", "path": "/data/ef/readme.txt"},
             ],
         })
+        rar_post = Post.from_api({
+            "id": "post-rar",
+            "service": "fanbox",
+            "user": "creator-1",
+            "title": "RAR 첨부 게시물",
+            "file": {"name": "character-pack.rar", "path": "/data/gh/opaque-download"},
+            "attachments": [],
+        })
         with patch.object(ui.PostBrowser, "_thumbnail_url_for_post", return_value=""):
-            browser.set_posts([image_only, post])
+            browser.set_posts([image_only, post, rar_post])
 
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
-        self.assertEqual(len(browser.posts), 1)
-        self.assertEqual(browser.items.count(), 1)
+        self.assertEqual(len(browser.posts), 2)
+        self.assertEqual(browser.items.count(), 2)
         self.assertEqual(browser.items.item(0).text(), "제목만 보이는 게시물")
+        self.assertEqual(browser.items.item(1).text(), "RAR 첨부 게시물")
         browser._populate_attachment_cards(post)
         self.assertFalse(hasattr(browser, "analysis_buttons"))
         self.assertEqual(browser.items.viewMode(), ui.QListView.IconMode)
