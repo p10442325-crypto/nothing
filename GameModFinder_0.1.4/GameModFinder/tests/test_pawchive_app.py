@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import bz2
+import gzip
 import io
 import json
+import lzma
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1026,6 +1029,27 @@ class DownloadSafetyTests(unittest.TestCase):
             self.assertIsNone(extraction_dir)
             self.assertEqual(extracted, [])
             self.assertTrue(download.exists())
+
+    def test_single_file_compressions_are_extracted_and_originals_removed(self):
+        payload = b"decompressed mod payload"
+        cases = (
+            ("opaque-download", gzip.compress(payload), "opaque-download.decompressed"),
+            ("sample.bin.bz2", bz2.compress(payload), "sample.bin"),
+            ("sample.bin.xz", lzma.compress(payload), "sample.bin"),
+        )
+
+        for filename, compressed, output_name in cases:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                archive = Path(tmp) / filename
+                archive.write_bytes(compressed)
+
+                extraction_dir, extracted = extract_archive_and_remove(archive)
+
+                self.assertFalse(archive.exists())
+                self.assertEqual(len(extracted), 1)
+                self.assertEqual(extracted[0].name, output_name)
+                self.assertEqual(extracted[0].read_bytes(), payload)
+                self.assertEqual(extraction_dir, Path(tmp) / f"{Path(filename).stem}_extracted")
 
     def test_downloaded_7z_is_extracted_and_original_archive_removed(self):
         try:
