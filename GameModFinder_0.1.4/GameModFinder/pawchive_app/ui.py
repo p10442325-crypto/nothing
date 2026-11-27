@@ -4,6 +4,8 @@ import json
 import os
 import re
 import sqlite3
+from tempfile import TemporaryDirectory
+from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -11,7 +13,7 @@ from typing import Callable
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl, QSize
 from PySide6.QtGui import QDesktopServices, QPixmap, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QPlainTextEdit, QTextBrowser, QProgressBar, QSpinBox, QSplitter, QTabWidget,
     QVBoxLayout, QWidget, QInputDialog, QStackedWidget, QListView, QGridLayout, QScrollArea,
@@ -19,7 +21,8 @@ from PySide6.QtWidgets import (
 
 from .api import PawchiveClient, PawchiveError
 from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
-from .models import Attachment, Creator, Post, parse_creator_url
+from .models import Attachment, Creator, Post, parse_creator_url, post_matches_search_fields
+from .archive_analysis import ArchiveInspection, ArchiveInspectionError, analyze_archive_for_ini
 from .repository import LocalRepository
 from .updater import UpdateCheck, UpdateError, UpdateManager, UpdatePackage
 
@@ -103,6 +106,7 @@ class TaskThread(QThread):
 
 class PostBrowser(QWidget):
     download_requested = Signal(object, object)
+    analyze_requested = Signal(object, object)
     load_more_requested = Signal()
 
     ARCHIVE_SUFFIXES = {
@@ -205,7 +209,7 @@ class PostBrowser(QWidget):
         detail_layout.addWidget(self.attachments_heading)
         self.attachments_area = QScrollArea()
         self.attachments_area.setWidgetResizable(True)
-        self.attachments_area.setMaximumHeight(104)
+        self.attachments_area.setMaximumHeight(132)
         self.attachments_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.attachments_host = QWidget()
         self.attachments_grid = QGridLayout(self.attachments_host)
@@ -229,6 +233,7 @@ class PostBrowser(QWidget):
         self.posts: list[Post] = []
         self.current_post: Post | None = None
         self.attachment_buttons: list[QPushButton] = []
+        self.analysis_buttons: list[QPushButton] = []
 
         self._thumbnail_generation = 0
         self._thumbnail_items: dict[str, list[QListWidgetItem]] = {}
@@ -556,6 +561,7 @@ class PostBrowser(QWidget):
 
     def _clear_attachment_cards(self) -> None:
         self.attachment_buttons.clear()
+        self.analysis_buttons.clear()
         while self.attachments_grid.count():
             item = self.attachments_grid.takeAt(0)
             widget = item.widget()
@@ -584,6 +590,12 @@ class PostBrowser(QWidget):
             filename = QLabel(attachment.name or attachment.path.rsplit("/", 1)[-1])
             filename.setWordWrap(True)
             filename.setToolTip(attachment.path)
+            analyze_button = QPushButton("INI 검사")
+            analyze_button.setToolTip("압축을 풀거나 실행하지 않고 내부 파일 이름만 확인합니다.")
+            analyze_button.clicked.connect(
+                lambda checked=False, selected=attachment, source=post:
+                    self.analyze_requested.emit(source, selected)
+            )
             button = QPushButton("다운로드")
             button.setObjectName("Primary")
             button.clicked.connect(
@@ -592,6 +604,7 @@ class PostBrowser(QWidget):
             )
             row.addWidget(icon)
             row.addWidget(filename, 1)
+            row.addWidget(analyze_button)
             row.addWidget(button)
             grid_row, grid_col = divmod(index, 2)
             self.attachments_grid.addWidget(card, grid_row, grid_col)
@@ -746,9 +759,13 @@ class MainWindow(QMainWindow):
             Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home())
         )
         self._explore_query_active = ""
+        self._explore_search_title_active = True
+        self._explore_search_content_active = True
         self._explore_next_offset = 0
         self._explore_has_more = False
         self._explore_loading = False
+        self._mod_candidate_rows: list[dict] = []
+        self._selected_mod_candidate: dict | None = None
         self._build_ui()
         for browser in (self.following_browser, self.creator_browser, self.explore_browser):
             browser.set_session_cookie(self.settings.get("session_key") or None)
@@ -757,6 +774,7 @@ class MainWindow(QMainWindow):
         self._reset_timer()
         self._load_creators()
         self._load_following_local()
+        self._refresh_mod_candidates()
         if self.database.followed_creators():
             QTimer.singleShot(1800, self.refresh_following)
 
@@ -793,6 +811,7 @@ class MainWindow(QMainWindow):
         following_layout.addLayout(top)
         self.following_browser = PostBrowser()
         self.following_browser.download_requested.connect(self.download_attachment)
+        self.following_browser.analyze_requested.connect(self.inspect_archive_attachment)
         following_layout.addWidget(self.following_browser, 1)
         self.tabs.addTab(following_page, "팔로잉")
 
@@ -821,6 +840,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.creator_list)
         self.creator_browser = PostBrowser()
         self.creator_browser.download_requested.connect(self.download_attachment)
+        self.creator_browser.analyze_requested.connect(self.inspect_archive_attachment)
         splitter.addWidget(self.creator_browser)
         splitter.setSizes([300, 920])
         creators_layout.addWidget(splitter, 1)
@@ -828,6 +848,7 @@ class MainWindow(QMainWindow):
 
         # Discover
         discover_page = QWidget(); discover_layout = QVBoxLayout(discover_page)
+        self.discover_page = discover_page
         discover_panel = QFrame(); discover_panel.setObjectName("Panel")
         discover_form = QVBoxLayout(discover_panel)
         discover_form.addWidget(QLabel("Pawchive 크리에이터 추가"))
@@ -861,18 +882,68 @@ class MainWindow(QMainWindow):
         # Explore
         explore_page = QWidget(); explore_layout = QVBoxLayout(explore_page)
         explore_top = QHBoxLayout()
-        self.explore_query = QLineEdit(); self.explore_query.setPlaceholderText("Pawchive 전체 게시물 검색 (비워두면 최신순)")
+        self.explore_query = QLineEdit()
+        self.explore_query.setPlaceholderText("캐릭터 이름/영문 별칭 등 Pawchive 게시물 검색")
         self.explore_query.returnPressed.connect(self.explore_posts)
         explore_button = QPushButton("게시물 검색")
         explore_button.setObjectName("Primary")
         explore_button.clicked.connect(self.explore_posts)
-        explore_top.addWidget(self.explore_query, 1); explore_top.addWidget(explore_button)
+        explore_top.addWidget(self.explore_query, 1)
+        explore_top.addWidget(explore_button)
         explore_layout.addLayout(explore_top)
+
+        search_scope = QHBoxLayout()
+        search_scope.addWidget(QLabel("검색 범위"))
+        self.explore_search_title = QCheckBox("제목")
+        self.explore_search_title.setChecked(True)
+        self.explore_search_content = QCheckBox("내용")
+        self.explore_search_content.setChecked(True)
+        search_scope.addWidget(self.explore_search_title)
+        search_scope.addWidget(self.explore_search_content)
+        search_scope.addStretch()
+        search_scope.addWidget(QLabel("검색 결과는 압축파일 첨부 게시물만 표시합니다."))
+        explore_layout.addLayout(search_scope)
+
         self.explore_browser = PostBrowser()
         self.explore_browser.download_requested.connect(self.download_attachment)
+        self.explore_browser.analyze_requested.connect(self.inspect_archive_attachment)
         self.explore_browser.load_more_requested.connect(self.load_more_explore_posts)
         explore_layout.addWidget(self.explore_browser, 1)
         self.tabs.addTab(explore_page, "전체 탐색")
+
+        # Creators whose archive contents included INI files.
+        candidate_page = QWidget()
+        candidate_layout = QVBoxLayout(candidate_page)
+        candidate_top = QHBoxLayout()
+        candidate_top.addWidget(QLabel("압축파일 내부에서 INI 파일이 확인된 작성자"))
+        candidate_top.addStretch()
+        candidate_refresh = QPushButton("새로고침")
+        candidate_refresh.clicked.connect(self._refresh_mod_candidates)
+        candidate_top.addWidget(candidate_refresh)
+        candidate_layout.addLayout(candidate_top)
+        self.mod_candidate_list = QListWidget()
+        self.mod_candidate_list.currentRowChanged.connect(self._mod_candidate_selected)
+        candidate_layout.addWidget(self.mod_candidate_list, 1)
+        self.mod_candidate_detail = QLabel("아직 INI 파일이 확인된 제작자 후보가 없습니다.")
+        self.mod_candidate_detail.setWordWrap(True)
+        self.mod_candidate_detail.setObjectName("Subtle")
+        candidate_layout.addWidget(self.mod_candidate_detail)
+        candidate_actions = QHBoxLayout()
+        self.open_candidate_post_button = QPushButton("근거 게시물 열기")
+        self.open_candidate_post_button.clicked.connect(self._open_mod_candidate_post)
+        self.open_candidate_creator_button = QPushButton("크리에이터 프로필 열기")
+        self.open_candidate_creator_button.clicked.connect(self._open_mod_candidate_profile)
+        self.use_candidate_id_button = QPushButton("크리에이터 찾기에 ID 입력")
+        self.use_candidate_id_button.clicked.connect(self._load_candidate_into_discover)
+        for button in (
+            self.open_candidate_post_button,
+            self.open_candidate_creator_button,
+            self.use_candidate_id_button,
+        ):
+            button.setEnabled(False)
+            candidate_actions.addWidget(button)
+        candidate_layout.addLayout(candidate_actions)
+        self.tabs.addTab(candidate_page, "모드 후보")
 
         # Downloads
         downloads_page = QWidget(); downloads_layout = QVBoxLayout(downloads_page)
@@ -1158,14 +1229,21 @@ class MainWindow(QMainWindow):
 
     def explore_posts(self) -> None:
         query = self.explore_query.text().strip()
+        include_title = self.explore_search_title.isChecked()
+        include_content = self.explore_search_content.isChecked()
         if query and len(query) < 3:
             QMessageBox.information(self, "검색어 길이", "검색어는 3글자 이상 입력하세요.")
+            return
+        if query and not (include_title or include_content):
+            QMessageBox.information(self, "검색 범위", "제목 또는 내용을 하나 이상 선택하세요.")
             return
         if any(worker.isRunning() for worker in self.workers):
             QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 검색해 주세요.")
             return
 
         self._explore_query_active = query
+        self._explore_search_title_active = include_title
+        self._explore_search_content_active = include_content
         self._explore_next_offset = 0
         self._explore_has_more = False
         self._explore_loading = True
@@ -1175,9 +1253,17 @@ class MainWindow(QMainWindow):
 
         def task():
             with self._client() as client:
-                posts = client.recent_posts(query or None, offset=0)
-            self.database.save_posts(posts)
-            return posts
+                raw_posts = client.recent_posts(query or None, offset=0)
+            self.database.save_posts(raw_posts)
+            visible_posts = [
+                post for post in raw_posts
+                if post_matches_search_fields(
+                    post, query,
+                    include_title=include_title,
+                    include_content=include_content,
+                )
+            ]
+            return raw_posts, visible_posts
 
         def failed(message: str) -> None:
             self._explore_loading = False
@@ -1186,14 +1272,21 @@ class MainWindow(QMainWindow):
             self.status.setText("전체 탐색 실패")
             QMessageBox.warning(self, "전체 탐색 실패", message)
 
-        def done(posts):
+        def done(result) -> None:
+            raw_posts, visible_posts = result
             self._explore_loading = False
-            self.explore_browser.set_posts(posts)
+            self.explore_browser.set_posts(visible_posts)
             self._explore_next_offset = 50
-            self._explore_has_more = len(posts) >= 50
+            self._explore_has_more = len(raw_posts) >= 50
             self.explore_browser.set_pagination(self._explore_has_more)
+            if query and not self.explore_browser.posts and self._explore_has_more:
+                self.explore_browser.list_empty.setText(
+                    "이 페이지에는 선택한 검색 범위에 맞는 압축파일 게시물이 없습니다. "
+                    "다음 페이지를 불러올 수 있습니다."
+                )
             self.status.setText(
-                f"전체 탐색 1페이지 · 압축파일 게시물 {len(self.explore_browser.posts):,}개"
+                f"전체 탐색 1페이지 · 압축파일 게시물 "
+                f"{len(self.explore_browser.posts):,}개"
             )
 
         self._run_task("Pawchive 전체 게시물 첫 페이지 검색 중…", task, done, failed)
@@ -1206,6 +1299,8 @@ class MainWindow(QMainWindow):
             return
 
         query = self._explore_query_active
+        include_title = self._explore_search_title_active
+        include_content = self._explore_search_content_active
         offset = self._explore_next_offset
         page_number = offset // 50 + 1
         self._explore_loading = True
@@ -1213,9 +1308,17 @@ class MainWindow(QMainWindow):
 
         def task():
             with self._client() as client:
-                posts = client.recent_posts(query or None, offset=offset)
-            self.database.save_posts(posts)
-            return posts
+                raw_posts = client.recent_posts(query or None, offset=offset)
+            self.database.save_posts(raw_posts)
+            visible_posts = [
+                post for post in raw_posts
+                if post_matches_search_fields(
+                    post, query,
+                    include_title=include_title,
+                    include_content=include_content,
+                )
+            ]
+            return raw_posts, visible_posts
 
         def failed(message: str) -> None:
             self._explore_loading = False
@@ -1223,18 +1326,171 @@ class MainWindow(QMainWindow):
             self.status.setText("전체 탐색 페이지 불러오기 실패")
             QMessageBox.warning(self, "전체 탐색 실패", message)
 
-        def done(posts):
+        def done(result) -> None:
+            raw_posts, visible_posts = result
             self._explore_loading = False
-            self.explore_browser.append_posts(posts)
+            self.explore_browser.append_posts(visible_posts)
             self._explore_next_offset = offset + 50
-            self._explore_has_more = len(posts) >= 50
+            self._explore_has_more = len(raw_posts) >= 50
             self.explore_browser.set_pagination(self._explore_has_more)
+            if not self.explore_browser.posts and query:
+                self.explore_browser.list_empty.setText(
+                    "아직 선택한 검색 범위에 맞는 압축파일 게시물이 없습니다. "
+                    "다음 페이지에서 계속 확인할 수 있습니다."
+                )
             self.status.setText(
                 f"전체 탐색 {page_number}페이지 · 누적 압축파일 게시물 "
                 f"{len(self.explore_browser.posts):,}개"
             )
 
         self._run_task(f"Pawchive 전체 탐색 {page_number}페이지 불러오는 중…", task, done, failed)
+
+    def inspect_archive_attachment(self, post: Post, attachment: Attachment) -> None:
+        if any(worker.isRunning() for worker in self.workers):
+            QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 검사해 주세요.")
+            return
+
+        def task() -> ArchiveInspection:
+            with TemporaryDirectory(prefix="pawchive_ini_", dir=str(data_dir())) as temporary:
+                raw_name = Path(attachment.name or attachment.path.rsplit("/", 1)[-1]).name
+                filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
+                target = Path(temporary) / (filename or "archive.zip")
+                saved = download_file(
+                    attachment.path,
+                    target,
+                    session_cookie=self.settings.get("session_key") or None,
+                    filename=attachment.name,
+                )
+                return analyze_archive_for_ini(saved)
+
+        def done(analysis: ArchiveInspection) -> None:
+            if analysis.ini_count:
+                self.database.save_mod_creator_evidence(
+                    post, attachment.name, analysis.ini_files, analysis.ini_count
+                )
+                self._refresh_mod_candidates()
+                file_lines = "\n".join(f"  • {name}" for name in analysis.ini_files)
+                more = (
+                    f"\n외 {analysis.ini_count - len(analysis.ini_files)}개"
+                    if analysis.ini_count > len(analysis.ini_files) else ""
+                )
+                QMessageBox.information(
+                    self,
+                    "INI 파일 발견",
+                    f"{analysis.archive_format} 내부에서 INI 파일 "
+                    f"{analysis.ini_count}개를 찾았습니다.\n\n"
+                    f"작성자: {post.service}:{post.creator_id}\n"
+                    f"게시물: {post.title}\n\n{file_lines}{more}\n\n"
+                    "작성자를 '모드 제작자 후보' 목록에 기록했습니다. "
+                    "INI가 있다는 사실만으로 모드임을 확정하지는 않습니다.",
+                )
+                self.status.setText("INI 발견 · 모드 제작자 후보에 추가")
+            else:
+                QMessageBox.information(
+                    self,
+                    "INI 파일 없음",
+                    f"{analysis.archive_format} 내부 파일 {analysis.member_count}개를 확인했지만 "
+                    "INI 파일은 찾지 못했습니다.\n\n"
+                    "다른 형식의 모드일 가능성까지 배제하는 것은 아닙니다.",
+                )
+                self.status.setText("압축파일 검사 완료 · INI 미발견")
+
+        def failed(message: str) -> None:
+            self.status.setText("압축파일 검사 실패")
+            QMessageBox.warning(self, "압축파일 검사 실패", message)
+
+        self._run_task(
+            f"{attachment.name or '압축파일'} 내부 INI 확인 중…",
+            task,
+            done,
+            failed,
+        )
+
+    def _refresh_mod_candidates(self) -> None:
+        if not hasattr(self, "mod_candidate_list"):
+            return
+        selected = self.mod_candidate_list.currentRow()
+        self._mod_candidate_rows = self.database.mod_creator_candidates()
+        self.mod_candidate_list.blockSignals(True)
+        self.mod_candidate_list.clear()
+        for row in self._mod_candidate_rows:
+            label = (
+                f"{row['service']}:{row['creator_id']}  ·  "
+                f"근거 게시물 {row['evidence_count']}개"
+            )
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, row)
+            self.mod_candidate_list.addItem(item)
+        self.mod_candidate_list.blockSignals(False)
+        if self._mod_candidate_rows:
+            self.mod_candidate_list.setCurrentRow(min(max(0, selected), len(self._mod_candidate_rows) - 1))
+        else:
+            self._selected_mod_candidate = None
+            self.mod_candidate_detail.setText("아직 INI 파일이 확인된 제작자 후보가 없습니다.")
+            for button in (
+                self.open_candidate_post_button,
+                self.open_candidate_creator_button,
+                self.use_candidate_id_button,
+            ):
+                button.setEnabled(False)
+
+    def _mod_candidate_selected(self, index: int) -> None:
+        if index < 0 or index >= len(self._mod_candidate_rows):
+            self._selected_mod_candidate = None
+            return
+        row = self._mod_candidate_rows[index]
+        self._selected_mod_candidate = row
+        evidence = self.database.mod_creator_evidence_for_creator(
+            row["service"], row["creator_id"]
+        )
+        latest = evidence[0] if evidence else {}
+        try:
+            ini_paths = json.loads(latest.get("ini_files_json", "[]"))
+        except (TypeError, ValueError):
+            ini_paths = []
+        listed = "\n".join(f"• {path}" for path in ini_paths)
+        self.mod_candidate_detail.setText(
+            f"작성자: {row['service']}:{row['creator_id']}\n"
+            f"INI 확인 근거 게시물: {row['evidence_count']}개\n"
+            f"최근 게시물: {latest.get('post_title') or '(제목 없음)'}\n"
+            f"압축파일: {latest.get('archive_name', '')}\n"
+            f"INI 파일 수: {latest.get('ini_count', 0)}개\n{listed}\n\n"
+            "이 목록은 INI 파일이 발견된 작성자 후보입니다. 최종 판단은 게시물과 파일 내용을 확인해 주세요."
+        )
+        for button in (
+            self.open_candidate_post_button,
+            self.open_candidate_creator_button,
+            self.use_candidate_id_button,
+        ):
+            button.setEnabled(True)
+
+    def _open_mod_candidate_post(self) -> None:
+        row = self._selected_mod_candidate
+        if not row or not row.get("latest_post_id"):
+            return
+        url = (
+            f"https://pawchive.pw/{quote(row['service'], safe='')}/user/"
+            f"{quote(row['creator_id'], safe='')}/post/{quote(row['latest_post_id'], safe='')}"
+        )
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _open_mod_candidate_profile(self) -> None:
+        row = self._selected_mod_candidate
+        if not row:
+            return
+        url = (
+            f"https://pawchive.pw/{quote(row['service'], safe='')}/user/"
+            f"{quote(row['creator_id'], safe='')}"
+        )
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _load_candidate_into_discover(self) -> None:
+        row = self._selected_mod_candidate
+        if not row:
+            return
+        self.service_input.setText(row["service"])
+        self.id_input.setText(row["creator_id"])
+        self.tabs.setCurrentWidget(self.discover_page)
 
     def download_attachment(self, post: Post, attachment: Attachment) -> None:
         paths = {"공통 저장 폴더": self.settings.get("download_dir", "")}

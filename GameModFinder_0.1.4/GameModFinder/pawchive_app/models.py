@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import html
 from typing import Any
 from urllib.parse import urlparse
 import re
@@ -138,3 +139,31 @@ def parse_creator_url(value: str) -> tuple[str, str]:
         raise ValueError("크리에이터 주소 형식이 올바르지 않습니다.")
     service, creator_id, _post_id = match.groups()
     return service, creator_id
+
+
+def post_matches_search_fields(
+    post: Post,
+    query: str,
+    *,
+    include_title: bool = True,
+    include_content: bool = True,
+) -> bool:
+    """Match every query term against only the selected post fields."""
+    terms = [term.casefold() for term in (query or "").split() if term]
+    if not terms:
+        return True
+    if not include_title and not include_content:
+        return False
+
+    title = " ".join((post.title or "").casefold().split())
+    body = post.content or ""
+    body = re.sub(r"<[^>]*>", " ", body)
+    body = re.sub(r"\s+", " ", html.unescape(body)).casefold()
+
+    searchable = " ".join(
+        value for enabled, value in (
+            (include_title, title),
+            (include_content, body),
+        ) if enabled
+    )
+    return all(term in searchable for term in terms)

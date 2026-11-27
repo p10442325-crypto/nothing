@@ -36,13 +36,17 @@ class DesktopSmokeTests(unittest.TestCase):
                 window = MainWindow()
             self.assertEqual(
                 [window.tabs.tabText(i) for i in range(window.tabs.count())],
-                ["팔로잉", "크리에이터", "크리에이터 찾기", "전체 탐색", "다운로드", "설정"],
+                ["팔로잉", "크리에이터", "크리에이터 찾기", "전체 탐색", "모드 후보", "다운로드", "설정"],
             )
             self.assertTrue(hasattr(window.following_browser.content, "setHtml"))
             self.assertTrue(hasattr(window.following_browser, "image_preview"))
             self.assertTrue(hasattr(window.following_browser, "_thumbnail_workers"))
             self.assertTrue(hasattr(window, "creator_tag_combo"))
             self.assertEqual(window.creator_tag_combo.itemText(0), "전체 게시물")
+            self.assertTrue(window.explore_search_title.isChecked())
+            self.assertTrue(window.explore_search_content.isChecked())
+            self.assertTrue(hasattr(window.explore_browser, "analyze_requested"))
+            self.assertEqual(window.mod_candidate_list.count(), 0)
             self.assertIsNone(window.findChild(ui.QFrame, "Header"))
             self.assertEqual(window.settings_page.check_updates_button.text(), "업데이트 확인")
             self.assertEqual(window.settings_page.apply_update_button.text(), "업데이트 적용 후 재시작")
@@ -79,6 +83,9 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(len(browser.posts), 1)
         self.assertEqual(browser.items.count(), 1)
         self.assertEqual(browser.items.item(0).text(), "제목만 보이는 게시물")
+        browser._populate_attachment_cards(post)
+        self.assertEqual(len(browser.analysis_buttons), 1)
+        self.assertEqual(browser.analysis_buttons[0].text(), "INI 검사")
         self.assertEqual(browser.items.viewMode(), ui.QListView.IconMode)
         self.assertEqual(browser.items.verticalScrollMode(), ui.QListView.ScrollPerPixel)
         self.assertEqual(browser.items.verticalScrollBar().singleStep(), 24)

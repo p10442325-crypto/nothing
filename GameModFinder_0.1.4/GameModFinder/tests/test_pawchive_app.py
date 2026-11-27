@@ -15,9 +15,10 @@ from unittest.mock import patch
 
 from pawchive_app import downloads
 from pawchive_app.api import PawchiveClient
+from pawchive_app.archive_analysis import ArchiveInspectionError, analyze_archive_for_ini
 from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
 from pawchive_app.enhancements import pawchive_image_url
-from pawchive_app.models import Creator, Post, parse_creator_url
+from pawchive_app.models import Creator, Post, parse_creator_url, post_matches_search_fields
 from pawchive_app.repository import LocalRepository
 from pawchive_app.updater import BASELINE_COMMIT, UpdateManager, _APPLY_HELPER
 
@@ -592,3 +593,113 @@ class UpdaterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SearchFieldScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.post = Post.from_api({
+            "id": "search-1",
+            "service": "fanbox",
+            "user": "creator-1",
+            "title": "Raiden Shogun Outfit",
+            "content": "<p>New texture pack for Furina</p>",
+        })
+
+    def test_title_only_uses_title(self):
+        self.assertTrue(post_matches_search_fields(
+            self.post, "Raiden Shogun", include_title=True, include_content=False
+        ))
+        self.assertFalse(post_matches_search_fields(
+            self.post, "Furina", include_title=True, include_content=False
+        ))
+
+    def test_content_only_uses_body(self):
+        self.assertTrue(post_matches_search_fields(
+            self.post, "Furina texture", include_title=False, include_content=True
+        ))
+        self.assertFalse(post_matches_search_fields(
+            self.post, "Raiden", include_title=False, include_content=True
+        ))
+
+    def test_both_fields_preserve_combined_search(self):
+        self.assertTrue(post_matches_search_fields(
+            self.post, "Shogun Furina", include_title=True, include_content=True
+        ))
+        self.assertFalse(post_matches_search_fields(
+            self.post, "Furina", include_title=True, include_content=False
+        ))
+
+
+class ArchiveIniInspectionTests(unittest.TestCase):
+    def test_zip_ini_is_found_without_extracting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "mod.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("Character/Character.ini", "[Constants]")
+                zipped.writestr("README.txt", "Install guide")
+            result = analyze_archive_for_ini(archive)
+            self.assertEqual(result.archive_format, "ZIP")
+            self.assertEqual(result.member_count, 2)
+            self.assertEqual(result.ini_count, 1)
+            self.assertEqual(result.ini_files, ("Character/Character.ini",))
+            self.assertEqual(set(Path(tmp).iterdir()), {archive})
+
+    def test_ini_extension_check_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "mod.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("mods/CONFIG.INI", "data")
+            result = analyze_archive_for_ini(archive)
+            self.assertEqual(result.ini_count, 1)
+
+    def test_unsafe_member_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("../outside.ini", "bad")
+            with self.assertRaises(ArchiveInspectionError):
+                analyze_archive_for_ini(archive)
+
+    def test_tar_ini_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "mod.tar.gz"
+            source = Path(tmp) / "sample.ini"
+            source.write_text("[General]", encoding="utf-8")
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(source, arcname="Game/sample.ini")
+            result = analyze_archive_for_ini(archive)
+            self.assertEqual(result.archive_format, "TAR")
+            self.assertEqual(result.ini_count, 1)
+
+
+class ModCreatorEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.repository = LocalRepository(Path(self.temp.name) / "test.sqlite3")
+        self.post = Post.from_api({
+            "id": "post-ini-1",
+            "service": "fanbox",
+            "user": "creator-ini",
+            "title": "Character mod pack",
+        })
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_ini_evidence_is_grouped_by_creator_and_is_idempotent(self):
+        self.repository.save_mod_creator_evidence(
+            self.post, "character.zip", ["Game/Character.ini"], 1
+        )
+        self.repository.save_mod_creator_evidence(
+            self.post, "character.zip", ["Game/Character.ini"], 1
+        )
+        candidates = self.repository.mod_creator_candidates()
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["service"], "fanbox")
+        self.assertEqual(candidates[0]["creator_id"], "creator-ini")
+        self.assertEqual(candidates[0]["evidence_count"], 1)
+        evidence = self.repository.mod_creator_evidence_for_creator(
+            "fanbox", "creator-ini"
+        )
+        self.assertEqual(len(evidence), 1)
+        self.assertIn("Character.ini", evidence[0]["ini_files_json"])
