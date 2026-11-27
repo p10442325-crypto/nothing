@@ -1417,6 +1417,9 @@ class MainWindow(QMainWindow):
         if any(len(query) < 2 for query in queries):
             QMessageBox.information(self, "검색어 길이", "검색어는 2글자 이상 입력해 주세요.")
             return
+        if len(queries) > 20:
+            QMessageBox.information(self, "검색어 개수", "한 번에 최대 20개까지 입력할 수 있습니다.")
+            return
         include_title = self.mod_scan_title.isChecked()
         include_content = self.mod_scan_content.isChecked()
         if not (include_title or include_content):
@@ -1522,7 +1525,7 @@ class MainWindow(QMainWindow):
         listed = "\n".join(f"• {path}" for path in ini_paths)
         self.mod_candidate_detail.setText(
             f"작성자: {row['service']}:{row['creator_id']}\n"
-            f"INI 확인 근거 게시물: {row['evidence_count']}개\n"
+            f"INI 확인 압축파일: {row['evidence_count']}개\n"
             f"최근 게시물: {latest.get('post_title') or '(제목 없음)'}\n"
             f"압축파일: {latest.get('archive_name', '')}\n"
             f"INI 파일 수: {latest.get('ini_count', 0)}개\n{listed}\n\n"
