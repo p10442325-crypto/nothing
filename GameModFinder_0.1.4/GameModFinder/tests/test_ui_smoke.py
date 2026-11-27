@@ -48,7 +48,7 @@ class DesktopSmokeTests(unittest.TestCase):
             self.assertFalse(hasattr(window.explore_browser, "analyze_requested"))
             self.assertEqual(window.mod_candidate_list.count(), 0)
             self.assertTrue(hasattr(window, "mod_scan_queries"))
-            self.assertEqual(window.mod_scan_pages.value(), 5)
+            self.assertEqual(window.mod_scan_pages.value(), 1)
             self.assertIsNone(window.findChild(ui.QFrame, "Header"))
             self.assertEqual(window.settings_page.check_updates_button.text(), "업데이트 확인")
             self.assertEqual(window.settings_page.apply_update_button.text(), "업데이트 적용 후 재시작")
