@@ -55,7 +55,7 @@ def find_mega_file_url(value: Any) -> str:
         # Some APIs put the URL inside descriptive text or HTML rather than
         # returning a dedicated URL property.
         for match in re.findall(
-            r"https://(?:www\\.)?mega(?:\\.nz|\\.co\\.nz)/[^\\s\\\"'<>]+",
+            r"""https://(?:www[.])?mega(?:[.]nz|[.]co[.]nz)/[^\s"<>]+""",
             html.unescape(value),
             flags=re.I,
         ):
