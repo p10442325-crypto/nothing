@@ -52,6 +52,28 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(post.key, "fanbox:1234:88")
         self.assertEqual([item.name for item in post.files], ["main.zip", "preview.png"])
 
+    def test_post_parses_rar_file_from_string_and_query_filename(self):
+        post = Post.from_api({
+            "id": "89", "service": "fanbox", "user": "1234",
+            "file": "/data/ab/download?id=89&f=Character%20Mod.rar",
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "Character Mod.rar")
+        self.assertTrue(post.files[0].path.startswith("/data/ab/download?"))
+
+    def test_post_parses_files_map_and_alternate_download_fields(self):
+        post = Post.from_api({
+            "id": "90", "service": "fanbox", "user": "1234",
+            "files": {
+                "main.rar": {"download_url": "/data/ab/file?id=90"},
+                "extra.zip": "/data/cd/extra.zip",
+            },
+        })
+        self.assertEqual(
+            [item.name for item in post.files],
+            ["main.rar", "extra.zip"],
+        )
+
     def test_creator_url_parsing(self):
         self.assertEqual(
             parse_creator_url("https://pawchive.pw/fanbox/user/1234"),
