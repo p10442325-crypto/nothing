@@ -454,6 +454,109 @@ class RepositoryTests(unittest.TestCase):
                 repo.follow("fanbox", "missing")
 
 
+class MegaDownloadTests(unittest.TestCase):
+    def test_mega_public_file_download_streams_and_verifies_mac(self):
+        from Crypto.Cipher import AES
+        from mega.crypto import a32_to_base64, a32_to_str, base64_url_encode, encrypt_attr, str_to_a32
+
+        from pawchive_app.downloads import download_mega_file
+
+        plain = b"MEGA streaming test payload for a public shared file."
+        derived_key = (0x11223344, 0x22334455, 0x33445566, 0x44556677)
+        iv0, iv1 = 0x12345678, 0x23456789
+        key_bytes = a32_to_str(derived_key)
+        iv_bytes = a32_to_str((iv0, iv1, iv0, iv1))
+
+        padded = plain + (b"\x00" * ((-len(plain)) % 16))
+        chunk_mac_cipher = AES.new(key_bytes, AES.MODE_CBC, iv=iv_bytes)
+        chunk_mac = chunk_mac_cipher.encrypt(padded)[-16:]
+        file_mac = AES.new(key_bytes, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(chunk_mac)
+        words = str_to_a32(file_mac)
+        meta_mac = (words[0] ^ words[1], words[2] ^ words[3])
+
+        key_words = (
+            derived_key[0] ^ iv0,
+            derived_key[1] ^ iv1,
+            derived_key[2] ^ meta_mac[0],
+            derived_key[3] ^ meta_mac[1],
+            iv0, iv1, meta_mac[0], meta_mac[1],
+        )
+        file_key = a32_to_base64(key_words)
+        encrypted_attr = base64_url_encode(
+            encrypt_attr({"n": "sample-mod-pack.zip"}, derived_key)
+        )
+        from Crypto.Util import Counter
+        counter = Counter.new(128, initial_value=(iv0 << 32) + (iv1 << 64))
+        encrypted_payload = AES.new(
+            key_bytes, AES.MODE_CTR, counter=counter
+        ).encrypt(plain)
+
+        class FakeResponse:
+            headers = {"content-length": str(len(encrypted_payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_raw(self, chunk_size=None):
+                yield encrypted_payload[:5]
+                yield encrypted_payload[5:23]
+                yield encrypted_payload[23:]
+
+        class FakeHttp:
+            def stream(self, method, url, timeout=None):
+                self.request = (method, url, timeout)
+                return FakeResponse()
+
+            def close(self):
+                self.closed = True
+
+        class FakeMega:
+            def __init__(self):
+                self._http = FakeHttp()
+                self._http.closed = False
+
+            def _api_request(self, payload):
+                self.api_payload = payload
+                return {
+                    "g": "https://gfs123.userstorage.mega.co.nz/dl/public-file",
+                    "s": len(plain),
+                    "at": encrypted_attr,
+                }
+
+        fake = FakeMega()
+        progress = []
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "mega.Mega", return_value=fake
+        ):
+            saved = download_mega_file(
+                "https://mega.nz/file/BzcjlbzZ#" + file_key,
+                tmp,
+                progress_callback=lambda current, total: progress.append((current, total)),
+            )
+
+            self.assertEqual(saved.name, "sample-mod-pack.zip")
+            self.assertEqual(saved.read_bytes(), plain)
+            self.assertEqual(fake.api_payload, {"a": "g", "g": 1, "p": "BzcjlbzZ"})
+            self.assertEqual(progress[-1], (len(plain), len(plain)))
+            self.assertTrue(fake._http.closed)
+
+    def test_mega_public_file_download_rejects_non_mega_hosts(self):
+        from pawchive_app.downloads import download_mega_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(DownloadError, "MEGA 공개 파일 링크"):
+                download_mega_file(
+                    "https://evil.example/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw",
+                    tmp,
+                )
+
+
 class DownloadSafetyTests(unittest.TestCase):
     def test_only_dedicated_pawchive_file_host_is_allowed(self):
         self.assertEqual(

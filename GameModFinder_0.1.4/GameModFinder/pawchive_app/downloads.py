@@ -15,6 +15,7 @@ import zipfile
 from concurrent.futures import Future
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
+from typing import Callable
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 from .api import APP_USER_AGENT
@@ -630,6 +631,218 @@ def download_file(
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+
+def download_mega_file(
+    url: str,
+    destination_dir: str | Path,
+    timeout: int = 300,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Download and decrypt one public MEGA file link without opening a browser.
+
+    The public link key is used locally. Only the file handle is sent to MEGA's
+    API; the fragment key is never transmitted. Encrypted data is streamed,
+    decrypted chunk-by-chunk, and checked against MEGA's file MAC before the
+    completed file is made visible at its final path.
+    """
+    parsed = urlsplit((url or "").strip())
+    host = (parsed.hostname or "").lower()
+    allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
+    match = re.fullmatch(r"/file/([A-Za-z0-9_-]{8})/?", parsed.path or "")
+    file_key_text = unquote(parsed.fragment or "")
+    if (
+        parsed.scheme.lower() != "https"
+        or host not in allowed_hosts
+        or parsed.username is not None
+        or parsed.password is not None
+        or not match
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43,44}", file_key_text)
+    ):
+        raise DownloadError("올바른 MEGA 공개 파일 링크가 아닙니다.")
+
+    try:
+        from mega import Mega
+        from mega.crypto import (
+            a32_to_str,
+            base64_to_a32,
+            base64_url_decode,
+            decrypt_attr,
+            get_chunks,
+            str_to_a32,
+        )
+        from Crypto.Cipher import AES
+        from Crypto.Util import Counter
+    except ImportError as exc:
+        raise DownloadError(
+            "MEGA 다운로드 구성 요소가 없습니다. 앱 폴더에서 run.bat을 다시 실행해 "
+            "필수 패키지를 설치해 주세요."
+        ) from exc
+
+    client = Mega()
+    temporary: Path | None = None
+    try:
+        file_handle = match.group(1)
+        try:
+            key_words = base64_to_a32(file_key_text)
+        except Exception as exc:
+            raise DownloadError("MEGA 링크의 복호화 키를 읽지 못했습니다.") from exc
+        if len(key_words) != 8:
+            raise DownloadError("MEGA 링크의 복호화 키 길이가 올바르지 않습니다.")
+
+        # Public-link metadata call: the key fragment stays local.
+        file_data = client._api_request({"a": "g", "g": 1, "p": file_handle})
+        if not isinstance(file_data, dict) or not all(
+            field in file_data for field in ("g", "s", "at")
+        ):
+            raise DownloadError("MEGA에서 공개 파일 정보를 받지 못했습니다.")
+
+        file_url = str(file_data["g"])
+        cdn = urlsplit(file_url)
+        cdn_host = (cdn.hostname or "").lower()
+        if (
+            cdn.scheme.lower() != "https"
+            or not cdn_host
+            or cdn.username is not None
+            or cdn.password is not None
+            or not (
+                cdn_host in {"mega.nz", "mega.co.nz"}
+                or cdn_host.endswith(".mega.nz")
+                or cdn_host.endswith(".mega.co.nz")
+            )
+        ):
+            raise DownloadError("MEGA가 안전하지 않은 다운로드 서버 주소를 반환했습니다.")
+
+        try:
+            file_size = int(file_data["s"])
+        except (TypeError, ValueError) as exc:
+            raise DownloadError("MEGA 파일 크기 정보가 올바르지 않습니다.") from exc
+        if file_size <= 0:
+            raise DownloadError("MEGA 파일이 비어 있거나 크기를 확인할 수 없습니다.")
+
+        decrypt_key = (
+            key_words[0] ^ key_words[4],
+            key_words[1] ^ key_words[5],
+            key_words[2] ^ key_words[6],
+            key_words[3] ^ key_words[7],
+        )
+        iv_words = key_words[4:6]
+        expected_meta_mac = key_words[6:8]
+        try:
+            attributes = decrypt_attr(base64_url_decode(file_data["at"]), decrypt_key)
+            remote_name = str(attributes["n"])
+        except Exception as exc:
+            raise DownloadError("MEGA 파일 이름 정보를 복호화하지 못했습니다.") from exc
+
+        # Use MEGA's encrypted metadata filename, never the generic link-card label.
+        safe_name = remote_name.replace("\\", "/").rsplit("/", 1)[-1]
+        safe_name = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]', "_", safe_name).strip(" .")
+        if not safe_name or safe_name in {".", ".."}:
+            safe_name = "mega-download.bin"
+
+        folder = Path(destination_dir).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / safe_name
+        if target.exists():
+            raise FileExistsError(f"파일이 이미 존재합니다: {target}")
+        temporary = target.with_name(target.name + ".mega.part")
+        if temporary.exists():
+            raise FileExistsError(f"임시 파일이 이미 존재합니다: {temporary}")
+
+        key_bytes = a32_to_str(decrypt_key)
+        iv_bytes = a32_to_str((iv_words[0], iv_words[1], iv_words[0], iv_words[1]))
+        counter_value = (iv_words[0] << 32) + (iv_words[1] << 64)
+        counter = Counter.new(128, initial_value=counter_value)
+        stream_cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
+        running_mac = b"\x00" * 16
+        downloaded = 0
+
+        with _TRANSFER_SEMAPHORE:
+            with client._http.stream("GET", file_url, timeout=timeout) as response:
+                response.raise_for_status()
+                declared_length = response.headers.get("content-length")
+                if declared_length:
+                    try:
+                        if int(declared_length) != file_size:
+                            raise DownloadError(
+                                f"MEGA 응답 크기가 메타데이터와 다릅니다: "
+                                f"{declared_length}B / {file_size}B"
+                            )
+                    except ValueError as exc:
+                        raise DownloadError("MEGA 응답의 Content-Length가 올바르지 않습니다.") from exc
+
+                chunks = iter(response.iter_raw(chunk_size=1024 * 1024))
+                pending = bytearray()
+
+                def read_exact(amount: int) -> bytes:
+                    while len(pending) < amount:
+                        try:
+                            pending.extend(next(chunks))
+                        except StopIteration:
+                            break
+                    if len(pending) < amount:
+                        raise DownloadError(
+                            f"MEGA 다운로드가 중간에 끊겼습니다: {downloaded}B / {file_size}B"
+                        )
+                    result = bytes(pending[:amount])
+                    del pending[:amount]
+                    return result
+
+                with temporary.open("xb") as output:
+                    for _chunk_start, chunk_size in get_chunks(file_size):
+                        encrypted_chunk = read_exact(chunk_size)
+                        plain_chunk = stream_cipher.decrypt(encrypted_chunk)
+                        output.write(plain_chunk)
+
+                        # MEGA authenticates each decrypted transfer chunk with
+                        # AES-CBC, then chains those chunk MACs into the file MAC.
+                        chunk_mac_cipher = AES.new(
+                            key_bytes, AES.MODE_CBC, iv=iv_bytes
+                        )
+                        last_block = b""
+                        for offset in range(0, len(plain_chunk), 16):
+                            block = plain_chunk[offset:offset + 16]
+                            if len(block) < 16:
+                                block = block.ljust(16, b"\x00")
+                            last_block = chunk_mac_cipher.encrypt(block)
+                        if not last_block:
+                            raise DownloadError("MEGA 파일 청크가 비어 있습니다.")
+                        running_mac = AES.new(
+                            key_bytes, AES.MODE_CBC, iv=running_mac
+                        ).encrypt(last_block)
+
+                        downloaded += len(plain_chunk)
+                        if progress_callback:
+                            progress_callback(downloaded, file_size)
+
+                    if pending or any(chunks):
+                        raise DownloadError("MEGA 서버가 예상보다 큰 파일을 전송했습니다.")
+                    output.flush()
+                    os.fsync(output.fileno())
+
+        actual_mac = str_to_a32(running_mac)
+        calculated_meta_mac = (
+            actual_mac[0] ^ actual_mac[1],
+            actual_mac[2] ^ actual_mac[3],
+        )
+        if calculated_meta_mac != tuple(expected_meta_mac):
+            raise DownloadError(
+                "MEGA 파일 복호화 검증에 실패했습니다. 링크 키가 잘못되었거나 "
+                "다운로드 데이터가 손상되었을 수 있습니다."
+            )
+
+        os.replace(temporary, target)
+        temporary = None
+        return target
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        try:
+            client._http.close()
+        except Exception:
+            pass
+
 
 def _safe_target(root: Path, member_name: str) -> Path:
     normalized = member_name.replace("\\", "/")

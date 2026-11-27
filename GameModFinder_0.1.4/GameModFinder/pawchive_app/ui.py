@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import PawchiveClient, PawchiveError
-from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
+from .downloads import (DownloadError, download_file, download_mega_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url, post_matches_search_fields
 from .creator_discovery import (
     game_search_terms, load_game_catalog, parse_search_queries, scan_mod_creator_candidates,
@@ -600,7 +600,7 @@ class PostBrowser(QWidget):
             filename = QLabel(attachment.name or attachment.path.rsplit("/", 1)[-1])
             filename.setWordWrap(True)
             filename.setToolTip(attachment.path)
-            button = QPushButton("링크 열기" if is_external else "다운로드")
+            button = QPushButton("앱에서 다운로드" if is_external else "다운로드")
             button.setObjectName("Primary")
             button.clicked.connect(
                 lambda checked=False, selected=attachment, source=post:
@@ -1086,6 +1086,35 @@ class MainWindow(QMainWindow):
         self.status.setText(f"{label} · 동시 다운로드 {len(active) + 1}/3")
         worker = TaskThread(task)
         self.download_workers.add(worker)
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(self._task_failed)
+        worker.finished.connect(lambda current=worker: self.download_workers.discard(current))
+        worker.start()
+
+    def _run_progress_download_task(
+        self,
+        label: str,
+        task: Callable[[Callable[[str], None]], object],
+        on_success: Callable[[object], None],
+    ) -> None:
+        active = [worker for worker in self.download_workers if worker.isRunning()]
+        if len(active) >= 3:
+            QMessageBox.information(
+                self, "다운로드 대기",
+                "동시에 진행할 수 있는 파일 다운로드는 최대 3개입니다. "
+                "하나가 끝나면 다시 시도해 주세요.",
+            )
+            return
+        self.status.setText(f"{label} · 동시 다운로드 {len(active) + 1}/3")
+        worker_ref: dict[str, TaskThread] = {}
+
+        def execute():
+            return task(lambda message: worker_ref["worker"].progress.emit(message))
+
+        worker = TaskThread(execute)
+        worker_ref["worker"] = worker
+        self.download_workers.add(worker)
+        worker.progress.connect(self.status.setText)
         worker.succeeded.connect(on_success)
         worker.failed.connect(self._task_failed)
         worker.finished.connect(lambda current=worker: self.download_workers.discard(current))
@@ -1622,7 +1651,8 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.discover_page)
 
     def download_attachment(self, post: Post, attachment: Attachment) -> None:
-        if attachment.kind == "external_link":
+        is_mega_link = attachment.kind == "external_link"
+        if is_mega_link:
             parsed = QUrl(attachment.path)
             allowed_hosts = {
                 "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
@@ -1632,9 +1662,6 @@ class MainWindow(QMainWindow):
                     self, "외부 링크 확인", "지원하지 않는 외부 다운로드 주소입니다."
                 )
                 return
-            QDesktopServices.openUrl(parsed)
-            self.status.setText("MEGA 외부 다운로드 링크를 브라우저에서 열었습니다.")
-            return
 
         paths = {"공통 저장 폴더": self.settings.get("download_dir", "")}
         for name, folder in self.settings.get("game_paths", {}).items():
@@ -1651,58 +1678,73 @@ class MainWindow(QMainWindow):
         if not accepted:
             return
         folder = Path(paths[choice]).expanduser()
-        raw_name = Path(attachment.name or attachment.path.rsplit("/", 1)[-1]).name
-        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .") or "download.bin"
-        target = folder / filename
+        if is_mega_link:
+            filename = "MEGA 파일"
+            target = None
+        else:
+            raw_name = Path(attachment.name or attachment.path.rsplit("/", 1)[-1]).name
+            filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .") or "download.bin"
+            target = folder / filename
         folder.mkdir(parents=True, exist_ok=True)
 
-        def task():
-            resolved_attachment = attachment
-            if attachment.deferred or not attachment.path:
-                # Deferred Pawchive references deliberately omit their stable
-                # path. Resolve a fresh signed URL only when the user chooses
-                # to download that file, not while browsing the creator.
-                with self._client() as client:
-                    detail = client.post_detail(
-                        post.service, post.creator_id, post.post_id
+        def task(report_progress):
+            if is_mega_link:
+                def mega_progress(downloaded: int, total: int) -> None:
+                    report_progress(
+                        f"MEGA 다운로드 중… {downloaded / (1024 * 1024):.1f} / "
+                        f"{total / (1024 * 1024):.1f} MiB"
                     )
-                merged = dict(post.raw)
-                merged.update(detail)
-                merged.setdefault("id", post.post_id)
-                merged.setdefault("service", post.service)
-                merged.setdefault("user", post.creator_id)
-                refreshed_post = Post.from_api(
-                    merged,
-                    Creator(service=post.service, creator_id=post.creator_id),
+                saved = download_mega_file(
+                    attachment.path, folder, progress_callback=mega_progress
                 )
-                self.database.save_posts([refreshed_post])
-                matches = [
-                    item for item in refreshed_post.files
-                    if item.name.casefold() == attachment.name.casefold()
-                    and item.path
-                ]
-                if not matches and attachment.kind:
+            else:
+                resolved_attachment = attachment
+                if attachment.deferred or not attachment.path:
+                    # Deferred Pawchive references deliberately omit their stable
+                    # path. Resolve a fresh signed URL only when the user chooses
+                    # to download that file, not while browsing the creator.
+                    with self._client() as client:
+                        detail = client.post_detail(
+                            post.service, post.creator_id, post.post_id
+                        )
+                    merged = dict(post.raw)
+                    merged.update(detail)
+                    merged.setdefault("id", post.post_id)
+                    merged.setdefault("service", post.service)
+                    merged.setdefault("user", post.creator_id)
+                    refreshed_post = Post.from_api(
+                        merged,
+                        Creator(service=post.service, creator_id=post.creator_id),
+                    )
+                    self.database.save_posts([refreshed_post])
                     matches = [
                         item for item in refreshed_post.files
-                        if item.kind == attachment.kind and item.path
+                        if item.name.casefold() == attachment.name.casefold()
+                        and item.path
                     ]
-                if not matches:
-                    raise DownloadError(
-                        "Pawchive에서 이 지연 첨부파일의 임시 다운로드 주소를 "
-                        "가져오지 못했습니다. 게시물 원문에서 파일 상태를 확인해 주세요."
-                    )
-                resolved_attachment = matches[0]
+                    if not matches and attachment.kind:
+                        matches = [
+                            item for item in refreshed_post.files
+                            if item.kind == attachment.kind and item.path
+                        ]
+                    if not matches:
+                        raise DownloadError(
+                            "Pawchive에서 이 지연 첨부파일의 임시 다운로드 주소를 "
+                            "가져오지 못했습니다. 게시물 원문에서 파일 상태를 확인해 주세요."
+                        )
+                    resolved_attachment = matches[0]
 
-            saved = download_file(
-                resolved_attachment.path, target,
-                session_cookie=self.settings.get("session_key") or None,
-                filename=attachment.name,
-            )
+                saved = download_file(
+                    resolved_attachment.path, target,
+                    session_cookie=self.settings.get("session_key") or None,
+                    filename=attachment.name,
+                )
+
             extracted = []
             try:
                 extracted = safe_extract_archive(saved, saved.parent / (saved.stem + "_extracted"))
-            except (ValueError, DownloadError, OSError) as exc:
-                # Non-archive files are expected. ZIP safety failures are surfaced to the user.
+            except (ValueError, DownloadError, OSError):
+                # Non-archive files are expected. Archive safety failures are surfaced to the user.
                 if saved.suffix.lower() in {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"}:
                     raise
             self.database.record_download(
@@ -1720,7 +1762,7 @@ class MainWindow(QMainWindow):
             self.status.setText("다운로드 완료")
             QMessageBox.information(self, "다운로드 완료", message)
 
-        self._run_task(f"{filename} 다운로드 중…", task, done)
+        self._run_progress_download_task(f"{filename} 다운로드 중…", task, done)
 
     def _refresh_download_history(self) -> None:
         self.download_history.clear()
