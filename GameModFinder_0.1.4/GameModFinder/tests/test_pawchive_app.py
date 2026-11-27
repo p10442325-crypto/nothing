@@ -74,6 +74,32 @@ class ModelTests(unittest.TestCase):
             ["main.rar", "extra.zip"],
         )
 
+    def test_post_parses_temp_url_and_inline_attachment_sources(self):
+        post = Post.from_api({
+            "id": "91", "service": "fanbox", "user": "1234",
+            "file": {
+                "filename": "main.rar",
+                "temp_url": "https://file.pawchive.pw/data/ab/temp?id=91",
+            },
+            "inline": [
+                {"filename": "inline-pack.rar", "temp_url": "/data/cd/inline"},
+            ],
+        })
+        self.assertEqual(
+            [item.name for item in post.files],
+            ["main.rar", "inline-pack.rar"],
+        )
+        self.assertEqual(post.files[0].path, "https://file.pawchive.pw/data/ab/temp?id=91")
+
+    def test_post_parses_archive_link_from_html_content(self):
+        post = Post.from_api({
+            "id": "92", "service": "fanbox", "user": "1234",
+            "content": '<p><a href="/data/ef/opaque">Download character.rar</a></p>',
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "Download character.rar")
+        self.assertEqual(post.files[0].kind, "inline")
+
     def test_creator_url_parsing(self):
         self.assertEqual(
             parse_creator_url("https://pawchive.pw/fanbox/user/1234"),
@@ -145,6 +171,23 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0].files[0].name, "character-pack.rar")
         fetch.assert_called_once_with("fanbox", "creator-1", "rar-post")
+
+    def test_complete_post_metadata_expands_posts_with_only_image_previews(self):
+        summary = Post.from_api({
+            "id": "rar-hidden", "service": "fanbox", "user": "creator-1",
+            "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
+            "attachments": [],
+        })
+        detail = {
+            "id": "rar-hidden",
+            "file": {"filename": "hidden-mod.rar", "temp_url": "/data/ab/temp"},
+            "attachments": [],
+            "inline": [],
+        }
+        with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
+            result = PawchiveClient().complete_post_metadata([summary])
+        self.assertEqual(result[0].files[0].name, "hidden-mod.rar")
+        fetch.assert_called_once_with("fanbox", "creator-1", "rar-hidden")
 
     def test_complete_post_metadata_keeps_post_when_detail_fails(self):
         partial = Post.from_api({
