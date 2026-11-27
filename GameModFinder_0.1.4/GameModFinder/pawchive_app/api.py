@@ -370,7 +370,6 @@ class PawchiveClient:
             raise PawchiveError("게시물 상세 응답에 게시물 ID가 없습니다.")
         raise PawchiveError("게시물 상세 응답에서 요청한 게시물을 찾지 못했습니다.")
 
-    @staticmethod
     def post_page_html(self, service: str, creator_id: str, post_id: str) -> str:
         """Fetch the rendered Pawchive post page for links omitted from its JSON API."""
         url = (
@@ -411,6 +410,7 @@ class PawchiveClient:
                 f"Python 연결: {python_error}. 브라우저 재시도: {browser_error}"
             ) from browser_error
 
+    @staticmethod
     def _post_needs_detail(post: Post) -> bool:
         """Expand incomplete list records and deferred archives, not full posts.
 
