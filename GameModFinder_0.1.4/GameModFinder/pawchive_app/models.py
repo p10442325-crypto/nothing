@@ -22,7 +22,11 @@ def is_mega_file_url(value: str) -> bool:
     host = (parsed.hostname or "").lower()
     allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io"}
     modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None
-    legacy_file = host.endswith("mega.co.nz") and parsed.path in {"", "/"} and parsed.fragment.startswith("!")
+    legacy_file = (
+        host in {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
+        and parsed.path in {"", "/"}
+        and re.fullmatch(r"!([A-Za-z0-9_-]{8,64})!([A-Za-z0-9_-]{43,44})", parsed.fragment or "") is not None
+    )
     return (
         parsed.scheme.lower() == "https"
         and host in allowed_hosts
@@ -346,9 +350,9 @@ class Post:
             }
             modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None and bool(parsed.fragment)
             legacy_file = (
-                host.endswith("mega.co.nz")
+                host in {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
                 and parsed.path in {"", "/"}
-                and parsed.fragment.startswith("!")
+                and re.fullmatch(r"!([A-Za-z0-9_-]{8,64})!([A-Za-z0-9_-]{43,44})", parsed.fragment or "") is not None
             )
             if parsed.scheme != "https" or not mega_host or not (modern_file or legacy_file):
                 return
