@@ -7,7 +7,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -201,6 +200,7 @@ class UpdateManager:
                         shutil.copyfileobj(source, target)
         except UpdateError:
             shutil.rmtree(staged_app, ignore_errors=True)
+            archive_path.unlink(missing_ok=True)
             raise
         except (OSError, zipfile.BadZipFile, RuntimeError, ValueError) as exc:
             shutil.rmtree(staged_app, ignore_errors=True)
