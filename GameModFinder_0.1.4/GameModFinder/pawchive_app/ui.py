@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import PawchiveClient, PawchiveError
-from .downloads import (DownloadError, download_file, download_mega_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
+from .downloads import (DownloadError, download_file, download_mega_file, extract_archive_and_remove, fetch_thumbnail_bytes, resolve_thumbnail_url)
 from .models import (Attachment, Creator, Post, extract_mega_links_from_post_html, is_mega_file_url, parse_creator_url, post_matches_search_fields)
 from .creator_discovery import (
     game_search_terms, load_game_catalog, parse_search_queries, scan_mod_creator_candidates,
@@ -1804,12 +1804,23 @@ class MainWindow(QMainWindow):
                     saved = download_from_post_page(file_error)
 
             extracted = []
+            extraction_dir = None
             try:
-                extracted = safe_extract_archive(saved, saved.parent / (saved.stem + "_extracted"))
+                extraction_dir, extracted = extract_archive_and_remove(saved)
             except (ValueError, DownloadError, OSError):
-                # Non-archive files are expected. Archive safety failures are surfaced to the user.
-                if saved.suffix.lower() in {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"}:
+                # Non-archive files are expected. Archive safety/extraction errors
+                # are surfaced, and the original archive is kept if extraction fails.
+                if saved.name.casefold().endswith(
+                    (".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tar.bz2",
+                     ".tar.xz", ".tgz", ".tbz2", ".txz")
+                ):
                     raise
+
+            # For successfully extracted archives, show and record the folder
+            # because the downloaded archive has now been removed.
+            if extraction_dir is not None:
+                saved = extraction_dir
+
             self.database.record_download(
                 post.service, post.creator_id, post.post_id, str(saved),
                 str(folder), "complete", "",
@@ -1819,9 +1830,14 @@ class MainWindow(QMainWindow):
         def done(result):
             saved, extracted = result
             self._refresh_download_history()
-            message = f"다운로드 완료: {saved}"
             if extracted:
-                message += f"\n압축 해제: {len(extracted)}개 파일"
+                message = (
+                    f"다운로드 및 압축 해제 완료: {saved}"
+                    f"\n압축 해제: {len(extracted)}개 파일"
+                    "\n원본 압축파일은 삭제했습니다."
+                )
+            else:
+                message = f"다운로드 완료: {saved}"
             self.status.setText("다운로드 완료")
             QMessageBox.information(self, "다운로드 완료", message)
 
