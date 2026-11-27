@@ -652,6 +652,14 @@ class ArchiveIniInspectionTests(unittest.TestCase):
             result = analyze_archive_for_ini(archive)
             self.assertEqual(result.ini_count, 1)
 
+    def test_windows_backslash_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr(r"..\\outside.ini", "bad")
+            with self.assertRaises(ArchiveInspectionError):
+                analyze_archive_for_ini(archive)
+
     def test_unsafe_member_path_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "unsafe.zip"
