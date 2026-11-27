@@ -737,7 +737,7 @@ def download_mega_file(
 
         # Use MEGA's encrypted metadata filename, never the generic link-card label.
         safe_name = remote_name.replace("\\", "/").rsplit("/", 1)[-1]
-        safe_name = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]', "_", safe_name).strip(" .")
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", safe_name).strip(" .")
         if not safe_name or safe_name in {".", ".."}:
             safe_name = "mega-download.bin"
 
@@ -752,7 +752,7 @@ def download_mega_file(
 
         key_bytes = a32_to_str(decrypt_key)
         iv_bytes = a32_to_str((iv_words[0], iv_words[1], iv_words[0], iv_words[1]))
-        counter_value = (iv_words[0] << 32) + (iv_words[1] << 64)
+        counter_value = ((iv_words[0] << 32) + iv_words[1]) << 64
         counter = Counter.new(128, initial_value=counter_value)
         stream_cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
         running_mac = b"\x00" * 16
@@ -832,7 +832,9 @@ def download_mega_file(
                 "다운로드 데이터가 손상되었을 수 있습니다."
             )
 
-        os.replace(temporary, target)
+        # Atomic hard-link creation fails if another file appeared at target.
+        os.link(temporary, target)
+        temporary.unlink()
         temporary = None
         return target
     finally:

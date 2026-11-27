@@ -486,7 +486,7 @@ class MegaDownloadTests(unittest.TestCase):
             encrypt_attr({"n": "sample-mod-pack.zip"}, derived_key)
         )
         from Crypto.Util import Counter
-        counter = Counter.new(128, initial_value=(iv0 << 32) + (iv1 << 64))
+        counter = Counter.new(128, initial_value=((iv0 << 32) + iv1) << 64)
         encrypted_payload = AES.new(
             key_bytes, AES.MODE_CTR, counter=counter
         ).encrypt(plain)
