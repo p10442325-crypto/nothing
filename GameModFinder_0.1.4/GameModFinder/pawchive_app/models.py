@@ -31,6 +31,39 @@ def is_mega_file_url(value: str) -> bool:
         and (modern_file or legacy_file)
     )
 
+def find_mega_file_url(value: Any) -> str:
+    """Find a MEGA file URL anywhere in an attachment payload.
+
+    Pawchive may include a normal file path and an outbound MEGA URL in
+    different properties of the same attachment object. Prefer the MEGA URL
+    so it is never handed to the Pawchive file-server resolver.
+    """
+    if isinstance(value, dict):
+        for child in value.values():
+            found = find_mega_file_url(child)
+            if found:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            found = find_mega_file_url(child)
+            if found:
+                return found
+    elif isinstance(value, str):
+        candidate = html.unescape(value).strip().rstrip(".,);]")
+        if is_mega_file_url(candidate):
+            return candidate
+        # Some APIs put the URL inside descriptive text or HTML rather than
+        # returning a dedicated URL property.
+        for match in re.findall(
+            r"https://(?:www\\.)?mega(?:\\.nz|\\.co\\.nz)/[^\\s\\\"'<>]+",
+            html.unescape(value),
+            flags=re.I,
+        ):
+            candidate = match.rstrip(".,);]")
+            if is_mega_file_url(candidate):
+                return candidate
+    return ""
+
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
@@ -160,19 +193,17 @@ class Post:
         found: list[Attachment] = []
 
         def add_attachment(item: Any, kind: str = "attachment") -> None:
+            mega_url = find_mega_file_url(item)
             attachment = Attachment.from_api(item, kind)
+            if mega_url:
+                attachment = Attachment(
+                    name=(attachment.name if attachment else "") or "MEGA 외부 파일 링크",
+                    path=mega_url,
+                    kind="external_link",
+                    deferred=False,
+                )
             if not attachment:
                 return
-            # Some Pawchive responses put outbound MEGA URLs directly into
-            # attachments/files/inline. Normalize by URL, not the source field,
-            # so the download button always uses MEGA decryption.
-            if attachment.kind != "external_link" and is_mega_file_url(attachment.path):
-                attachment = Attachment(
-                    name=attachment.name or "MEGA 외부 파일 링크",
-                    path=attachment.path,
-                    kind="external_link",
-                    deferred=attachment.deferred,
-                )
             if attachment.path:
                 duplicate = any(
                     entry.path and entry.path == attachment.path
