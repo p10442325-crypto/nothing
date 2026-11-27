@@ -12,6 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -98,7 +99,7 @@ class UpdateManager:
     def check(self) -> UpdateCheck:
         url = (
             f"https://api.github.com/repos/{REPOSITORY}/commits/"
-            f"{UPDATE_BRANCH}"
+            f"{quote(UPDATE_BRANCH, safe='')}"
         )
         body = self._request_bytes(url, timeout=20, maximum=2 * 1024 * 1024)
         try:
@@ -145,7 +146,7 @@ class UpdateManager:
         found: set[str] = set()
         total_size = 0
         for info in selected:
-            relative = info.filename[len(prefix_text):]
+            relative = info.filename[len(prefix_text):].replace("\\", "/")
             parts = PurePosixPath(relative).parts
             if (
                 not parts
@@ -199,9 +200,11 @@ class UpdateManager:
                     with archive.open(info, "r") as source, destination.open("wb") as target:
                         shutil.copyfileobj(source, target)
         except UpdateError:
+            shutil.rmtree(staged_app, ignore_errors=True)
             raise
         except (OSError, zipfile.BadZipFile, RuntimeError, ValueError) as exc:
             shutil.rmtree(staged_app, ignore_errors=True)
+            archive_path.unlink(missing_ok=True)
             raise UpdateError(f"업데이트 ZIP을 안전하게 풀지 못했습니다: {exc}") from exc
 
         required_paths = (
@@ -329,6 +332,13 @@ def main():
         temporary.replace(marker)
     except Exception:
         log("Update failed; restoring the previous application.")
+        for child in install.iterdir():
+            if child.name in {".venv", ".git", "__pycache__", ".pytest_cache", ".mypy_cache"}:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
         shutil.copytree(backup, install, dirs_exist_ok=True, ignore=ignore_runtime)
         raise
 
