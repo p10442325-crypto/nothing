@@ -325,7 +325,12 @@ class RepositoryTests(unittest.TestCase):
             repo.save_mod_creator_evidence(starrail, "kafka.zip", ["Kafka.ini"], game_key="starrail", game_name="붕괴: 스타레일")
             self.assertEqual(len(repo.mod_creator_candidates(game_key="genshin")), 1)
             self.assertEqual(repo.mod_creator_evidence_for_creator("fanbox", "alice")[0]["game_key"], "starrail")
-            self.assertEqual(len(repo.mod_creator_candidates()), 1)
+            candidates = repo.mod_creator_candidates()
+            self.assertEqual(len(candidates), 2)
+            self.assertEqual(
+                {candidate["game_key"] for candidate in candidates},
+                {"genshin", "starrail"},
+            )
     def test_follow_unknown_creator_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = LocalRepository(Path(tmp) / "data.sqlite3")
