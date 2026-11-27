@@ -1,0 +1,35 @@
+name: Pawchive Mod Finder v2 tests
+
+on:
+  push:
+    branches:
+      - feature/pawchive-mod-finder-v2
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: GameModFinder_0.1.4/GameModFinder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3
+      - name: Install desktop requirements
+        run: python -m pip install -r requirements.txt
+      - name: Compile Python modules
+        run: python -m compileall -q pawchive_app main_v2.py
+      - name: Run Pawchive core tests
+        run: python -m unittest discover -s tests -p "test_pawchive_app.py" -v
+      - name: Run automated creator discovery tests
+        run: python -m unittest discover -s tests -p "test_creator_discovery.py" -v
+      - name: Smoke test desktop interface
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -p "test_ui_smoke.py" -v

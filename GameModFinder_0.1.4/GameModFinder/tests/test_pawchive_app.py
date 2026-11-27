@@ -1,0 +1,1316 @@
+from __future__ import annotations
+
+import bz2
+import gzip
+import io
+import json
+import lzma
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+import tempfile
+import tarfile
+import unittest
+import zipfile
+from pathlib import Path
+from urllib.error import URLError
+from unittest.mock import patch
+
+from pawchive_app import downloads
+from pawchive_app.api import PawchiveClient
+from pawchive_app.archive_analysis import ArchiveInspectionError, analyze_archive_for_ini
+from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, extract_archive_and_remove, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
+from pawchive_app.enhancements import pawchive_image_url
+from pawchive_app.models import (Creator, Post, extract_mega_links_from_post_html, parse_creator_url, post_matches_search_fields)
+from pawchive_app.repository import LocalRepository
+from pawchive_app.updater import BASELINE_COMMIT, UpdateManager, _APPLY_HELPER
+
+
+class FakeResponse(io.BytesIO):
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class ModelTests(unittest.TestCase):
+    def test_creator_and_post_are_keyed_with_service(self):
+        creator = Creator.from_api({
+            "id": "1234", "service": "fanbox", "name": "Sample Creator"
+        })
+        self.assertEqual(creator.key, "fanbox:1234")
+        self.assertEqual(
+            creator.profile_url, "https://pawchive.pw/fanbox/user/1234"
+        )
+
+        post = Post.from_api({
+            "id": "88", "service": "fanbox", "user": "1234",
+            "title": "Sample post",
+            "file": {"name": "main.zip", "path": "/data/ab/main.zip"},
+            "attachments": [{"name": "preview.png", "path": "/data/cd/preview.png"}],
+        }, creator)
+        self.assertEqual(post.key, "fanbox:1234:88")
+        self.assertEqual([item.name for item in post.files], ["main.zip", "preview.png"])
+
+    def test_post_keeps_multiple_distinct_pathless_attachments(self):
+        post = Post.from_api({
+            "id": "pathless-pair", "service": "patreon", "user": "124138802",
+            "file": {"name": "preview.jpg"},
+            "attachments": [{"name": "character-pack.rar", "deferred": True}],
+        })
+        self.assertEqual(
+            [item.name for item in post.files],
+            ["preview.jpg", "character-pack.rar"],
+        )
+
+    def test_post_preserves_pathless_deferred_rar_reference(self):
+        post = Post.from_api({
+            "id": "deferred-rar", "service": "fanbox", "user": "1234",
+            "title": "Deferred RAR",
+            "attachments": [
+                {"name": "character-pack.rar", "path": None, "deferred": True}
+            ],
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "character-pack.rar")
+        self.assertEqual(post.files[0].path, "")
+        self.assertTrue(post.files[0].deferred)
+
+    def test_post_parses_temp_download_url(self):
+        post = Post.from_api({
+            "id": "temp-url", "service": "fanbox", "user": "1234",
+            "file": {
+                "name": "main.rar",
+                "temp_download_url": "https://file.pawchive.pw/data/aa/temp",
+                "deferred": True,
+            },
+        })
+        self.assertEqual(
+            post.files[0].path,
+            "https://file.pawchive.pw/data/aa/temp",
+        )
+        self.assertTrue(post.files[0].deferred)
+
+    def test_post_parses_rar_file_from_string_and_query_filename(self):
+        post = Post.from_api({
+            "id": "89", "service": "fanbox", "user": "1234",
+            "file": "/data/ab/download?id=89&f=Character%20Mod.rar",
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "Character Mod.rar")
+        self.assertTrue(post.files[0].path.startswith("/data/ab/download?"))
+
+    def test_post_parses_files_map_and_alternate_download_fields(self):
+        post = Post.from_api({
+            "id": "90", "service": "fanbox", "user": "1234",
+            "files": {
+                "main.rar": {"download_url": "/data/ab/file?id=90"},
+                "extra.zip": "/data/cd/extra.zip",
+            },
+        })
+        self.assertEqual(
+            [item.name for item in post.files],
+            ["main.rar", "extra.zip"],
+        )
+
+    def test_post_parses_temp_url_and_inline_attachment_sources(self):
+        post = Post.from_api({
+            "id": "91", "service": "fanbox", "user": "1234",
+            "file": {
+                "filename": "main.rar",
+                "temp_url": "https://file.pawchive.pw/data/ab/temp?id=91",
+            },
+            "inline": [
+                {"filename": "inline-pack.rar", "temp_url": "/data/cd/inline"},
+            ],
+        })
+        self.assertEqual(
+            [item.name for item in post.files],
+            ["main.rar", "inline-pack.rar"],
+        )
+        self.assertEqual(post.files[0].path, "https://file.pawchive.pw/data/ab/temp?id=91")
+
+    def test_post_normalizes_mega_url_from_generic_attachment_array(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "mega-api-attachment",
+            "service": "patreon",
+            "user": "124138802",
+            "attachments": [{"name": "sample-pack.rar", "path": url}],
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "sample-pack.rar")
+        self.assertEqual(post.files[0].path, url)
+        self.assertEqual(post.files[0].kind, "external_link")
+
+    def test_post_prefers_mega_url_over_pawchive_path_in_attachment(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "mega-url-and-path",
+            "service": "patreon",
+            "user": "124138802",
+            "attachments": [{
+                "name": "sample-pack.rar",
+                "path": "/data/ab/sample-pack.rar",
+                "url": url,
+            }],
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "sample-pack.rar")
+        self.assertEqual(post.files[0].path, url)
+        self.assertEqual(post.files[0].kind, "external_link")
+
+    def test_post_parses_mega_file_anchor_without_archive_filename(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "101845109", "service": "patreon", "user": "124138802",
+            "title": "MEGA download post",
+            "content": f'<p><a href="{url}">Download</a></p>',
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].kind, "external_link")
+        self.assertEqual(post.files[0].path, url)
+        self.assertEqual(post.files[0].name, "MEGA 외부 파일 링크")
+
+    def test_is_mega_embed_and_mega_io_links_are_supported(self):
+        from pawchive_app.models import is_mega_file_url
+        url = "https://mega.io/embed/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        self.assertTrue(is_mega_file_url(url))
+
+    def test_legacy_mega_share_url_with_fragment_is_recognized(self):
+        from pawchive_app.models import is_mega_file_url
+        url = "https://mega.nz/#!BzcjlbzZ!uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        self.assertTrue(is_mega_file_url(url))
+        links = extract_mega_links_from_post_html(
+            '<h2>Downloads</h2><a href="' + url + '">Archive</a>',
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "Archive")])
+    def test_extract_mega_io_embed_link_from_post_html(self):
+        url = "https://mega.io/embed/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        links = extract_mega_links_from_post_html(
+            '<h2>Downloads</h2><a href="' + url + '">Archive</a>',
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "Archive")])
+    def test_post_extracts_mega_link_from_rendered_downloads_section(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        page_html = (
+            "<html><body>"
+            "<h2>Downloads</h2><div><a href='" + url + "'>Download character-pack.rar</a></div>"
+            "<h2>Comments</h2><a href='https://mega.nz/file/Another12#ignored'>Ignore</a>"
+            "</body></html>"
+        )
+        links = extract_mega_links_from_post_html(
+            page_html,
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "Download character-pack.rar")])
+
+    def test_post_extracts_mega_link_from_html_when_download_heading_is_missing(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        links = extract_mega_links_from_post_html(
+            f'<a href="{url}">Archive</a>',
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "")])
+
+    def test_post_parses_plain_text_mega_file_link(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "plain-mega", "service": "patreon", "user": "124138802",
+            "content": f"Download: {url}",
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].kind, "external_link")
+        self.assertEqual(post.files[0].path, url)
+
+    def test_post_parses_archive_link_from_html_content(self):
+        post = Post.from_api({
+            "id": "92", "service": "fanbox", "user": "1234",
+            "content": '<p><a href="/data/ef/opaque">Download character.rar</a></p>',
+        })
+        self.assertEqual(len(post.files), 1)
+        self.assertEqual(post.files[0].name, "Download character.rar")
+        self.assertEqual(post.files[0].kind, "inline")
+
+    def test_creator_url_parsing(self):
+        self.assertEqual(
+            parse_creator_url("https://pawchive.pw/fanbox/user/1234"),
+            ("fanbox", "1234"),
+        )
+        self.assertEqual(
+            parse_creator_url("https://pawchive.pw/fanbox/user/1234/post/88"),
+            ("fanbox", "1234"),
+        )
+        with self.assertRaises(ValueError):
+            parse_creator_url("https://example.com/fanbox/user/1234")
+        with self.assertRaises(ValueError):
+            parse_creator_url("https://pawchive.pw/creator/1234")
+
+
+class ApiTests(unittest.TestCase):
+    @patch("pawchive_app.api.urlopen")
+    def test_creator_index_parses_api_array(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse(json.dumps([
+            {"id": "1", "service": "fanbox", "name": "Alice"},
+            {"id": "2", "service": "patreon", "name": "Bob"},
+        ]).encode())
+        client = PawchiveClient(min_interval=1)
+        creators = client.search_creators(query="ali", service="fanbox")
+        self.assertEqual(len(creators), 1)
+        self.assertEqual(creators[0].creator_id, "1")
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/creators", request.full_url)
+        self.assertIn("PawchiveModFinder", request.get_header("User-agent"))
+
+    @patch.object(
+        PawchiveClient,
+        "_browser_get_text",
+        return_value='[{"id":"9","service":"fanbox","name":"Browser Fallback"}]',
+    )
+    @patch(
+        "pawchive_app.api.urlopen",
+        side_effect=URLError(ConnectionResetError(10054, "connection reset")),
+    )
+    def test_windows_connection_reset_uses_browser_fallback(self, _mock_urlopen, mock_browser):
+        with PawchiveClient() as client:
+            creators = client.list_creators()
+        self.assertEqual(creators[0].name, "Browser Fallback")
+        mock_browser.assert_called_once()
+
+    def test_post_detail_unwraps_nested_data_post(self):
+        client = PawchiveClient()
+        detail = {
+            "id": "88", "service": "fanbox", "user": "1234",
+            "file": {"name": "release.rar", "path": "/data/ab/release"},
+            "attachments": [],
+        }
+        with patch.object(client, "_get_json", return_value={"data": {"post": detail}}):
+            result = client.post_detail("fanbox", "1234", "88")
+        self.assertEqual(result["file"]["name"], "release.rar")
+
+    @patch("pawchive_app.api.urlopen")
+    def test_post_page_html_fetches_rendered_page_for_reported_post(self, mock_urlopen):
+        page_html = "<html><body><h2>Downloads</h2></body></html>"
+        mock_urlopen.return_value = FakeResponse(page_html.encode())
+        client = PawchiveClient()
+        result = client.post_page_html("patreon", "124138802", "172109941")
+        self.assertEqual(result, page_html)
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertIn("text/html", request.get_header("Accept"))
+
+    def test_deferred_detail_mega_url_is_normalized_for_download_routing(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        summary = Post.from_api({
+            "id": "172109941", "service": "patreon", "user": "124138802",
+            "attachments": [{"name": "character-pack.rar", "deferred": True}],
+        })
+        detail = {
+            "id": "172109941", "service": "patreon", "user": "124138802",
+            "attachments": [{"name": "character-pack.rar", "temp_url": url}],
+        }
+        refreshed = Post.from_api({**summary.raw, **detail})
+        self.assertEqual(summary.files[0].path, "")
+        self.assertEqual(refreshed.files[0].path, url)
+        self.assertEqual(refreshed.files[0].kind, "external_link")
+
+    def test_complete_post_metadata_expands_partial_patreon_post(self):
+        # Regression fixture follows the URL supplied for this report:
+        # /patreon/user/124138802/post/101845109.
+        summary = Post.from_api({
+            "id": "101845109", "service": "patreon", "user": "124138802",
+            "title": "Partial list record",
+            "has_full": False,
+            "file": None,
+            "attachments": [],
+        })
+        detail = {
+            "id": "101845109", "service": "patreon", "user": "124138802",
+            "file": None,
+            "attachments": [{
+                "name": "character-pack.rar",
+                "temp_url": "https://file.pawchive.pw/data/ab/temp",
+                "deferred": True,
+            }],
+        }
+        with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
+            completed = PawchiveClient().complete_post_metadata([summary])
+        self.assertEqual(
+            [item.name for item in completed[0].files],
+            ["character-pack.rar"],
+        )
+        fetch.assert_called_once_with("patreon", "124138802", "101845109")
+
+    def test_complete_post_metadata_fetches_missing_attachment_fields(self):
+        partial = Post.from_api({
+            "id": "rar-post", "service": "fanbox", "user": "creator-1",
+            "title": "RAR attachment post",
+            "attachments": [
+                {"name": "character-pack.rar", "path": None, "deferred": True}
+            ],
+        })
+        detail = {
+            "id": "rar-post",
+            "file": {"name": "character-pack.rar", "path": "/data/ab/character-pack"},
+            "attachments": [],
+        }
+        with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
+            completed = PawchiveClient().complete_post_metadata([partial])
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].files[0].name, "character-pack.rar")
+        fetch.assert_called_once_with("fanbox", "creator-1", "rar-post")
+
+    def test_complete_post_metadata_does_not_expand_regular_image_posts(self):
+        image_only = Post.from_api({
+            "id": "image-only", "service": "fanbox", "user": "creator-1",
+            "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
+            "attachments": [],
+        })
+        with patch.object(PawchiveClient, "post_detail") as fetch:
+            client = PawchiveClient()
+            result = client.complete_post_metadata([image_only])
+        self.assertEqual(result, [image_only])
+        self.assertEqual(client.last_detail_failures, 0)
+        fetch.assert_not_called()
+
+    def test_complete_post_metadata_expands_only_pathless_deferred_archives(self):
+        summary = Post.from_api({
+            "id": "rar-hidden", "service": "fanbox", "user": "creator-1",
+            "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
+            "attachments": [
+                {"name": "hidden-mod.rar", "deferred": True},
+            ],
+        })
+        detail = {
+            "id": "rar-hidden",
+            "file": {"name": "preview.jpg", "path": "/data/ab/preview.jpg"},
+            "attachments": [{
+                "name": "hidden-mod.rar",
+                "temp_download_url": "https://file.pawchive.pw/data/ab/temp",
+                "deferred": True,
+            }],
+        }
+        with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
+            result = PawchiveClient().complete_post_metadata([summary])
+        self.assertEqual(result[0].files[1].name, "hidden-mod.rar")
+        self.assertEqual(
+            result[0].files[1].path,
+            "https://file.pawchive.pw/data/ab/temp",
+        )
+        fetch.assert_called_once_with("fanbox", "creator-1", "rar-hidden")
+
+    def test_complete_post_metadata_keeps_post_when_detail_fails(self):
+        partial = Post.from_api({
+            "id": "no-detail", "service": "fanbox", "user": "creator-1",
+            "title": "Still show the deferred RAR post",
+            "attachments": [
+                {"name": "missing-link.rar", "deferred": True}
+            ],
+        })
+        with patch.object(PawchiveClient, "post_detail", side_effect=RuntimeError("temporary")):
+            client = PawchiveClient()
+            completed = client.complete_post_metadata([partial])
+        self.assertEqual(completed, [partial])
+        self.assertEqual(client.last_detail_failures, 1)
+
+    @patch("pawchive_app.api.urlopen")
+    def test_creator_post_route_and_offset(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse(json.dumps([
+            {"id": "88", "service": "fanbox", "user": "1234", "title": "One"}
+        ]).encode())
+        posts = PawchiveClient().creator_posts("fanbox", "1234", offset=50)
+        self.assertEqual(posts[0].post_id, "88")
+        self.assertIn("/fanbox/user/1234?o=50", mock_urlopen.call_args.args[0].full_url)
+
+    @patch("pawchive_app.api.urlopen")
+    def test_creator_tags_endpoint_parses_tag_names(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse(json.dumps([
+            "AI", {"name": "3D"}, {"tag": "AI"}, {"label": "Portrait"}
+        ]).encode())
+        tags = PawchiveClient().creator_tags("fanbox", "1234")
+        self.assertEqual(tags, ["3D", "AI", "Portrait"])
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/fanbox/user/1234/tags", request.full_url)
+
+    @patch("pawchive_app.api.urlopen")
+    def test_creator_posts_support_tag_query(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse(json.dumps([
+            {"id": "88", "service": "fanbox", "user": "1234", "title": "Tagged"}
+        ]).encode())
+        posts = PawchiveClient().creator_posts("fanbox", "1234", tag="AI")
+        self.assertEqual(posts[0].title, "Tagged")
+        self.assertIn("tag=AI", mock_urlopen.call_args.args[0].full_url)
+
+    def test_invalid_offset_rejected(self):
+        with self.assertRaises(ValueError):
+            PawchiveClient().creator_posts("fanbox", "1234", offset=1)
+
+    def test_all_creator_posts_fetches_past_three_pages(self):
+        calls = []
+        def page(_service, _creator_id, offset=0, query=None, tag=None):
+            calls.append((offset, tag))
+            count = 50 if offset < 100 else 17
+            return [
+                Post(service="fanbox", creator_id="1234", post_id=str(offset + index))
+                for index in range(count)
+            ]
+
+        with patch.object(PawchiveClient, "creator_posts", side_effect=page):
+            posts = PawchiveClient().all_creator_posts("fanbox", "1234")
+
+        self.assertEqual(calls, [(0, None), (50, None), (100, None)])
+        self.assertEqual(len(posts), 117)
+
+    def test_all_creator_posts_preserves_tag_across_pages(self):
+        calls = []
+        def page(_service, _creator_id, offset=0, query=None, tag=None):
+            calls.append((offset, tag))
+            count = 50 if offset == 0 else 3
+            return [
+                Post(service="fanbox", creator_id="1234", post_id=str(offset + index))
+                for index in range(count)
+            ]
+
+        with patch.object(PawchiveClient, "creator_posts", side_effect=page):
+            posts = PawchiveClient().all_creator_posts("fanbox", "1234", tag="AI")
+
+        self.assertEqual(calls, [(0, "AI"), (50, "AI")])
+        self.assertEqual(len(posts), 53)
+
+    def test_all_recent_posts_fetches_until_a_short_page(self):
+        calls = []
+        def page(query=None, offset=0):
+            calls.append(offset)
+            count = 50 if offset < 150 else 9
+            return [
+                Post(service="fanbox", creator_id="creator", post_id=str(offset + index))
+                for index in range(count)
+            ]
+
+        with patch.object(PawchiveClient, "recent_posts", side_effect=page):
+            posts = PawchiveClient().all_recent_posts()
+
+        self.assertEqual(calls, [0, 50, 100, 150])
+        self.assertEqual(len(posts), 159)
+
+
+class RepositoryTests(unittest.TestCase):
+    def test_following_feed_and_deduplicated_upsert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalRepository(Path(tmp) / "data.sqlite3")
+            creator = Creator(service="fanbox", creator_id="1234", name="Alice")
+            repo.save_creator(creator)
+            repo.follow("fanbox", "1234")
+            post = Post(
+                service="fanbox", creator_id="1234", post_id="88",
+                title="New post", published="2026-01-01",
+                raw={"title": "New post"},
+            )
+            repo.save_posts([post, post])
+            feed = repo.following_feed()
+            self.assertEqual(len(feed), 1)
+            self.assertEqual(feed[0]["creator_name"], "Alice")
+            repo.unfollow("fanbox", "1234")
+            self.assertEqual(repo.following_feed(), [])
+
+    def test_following_and_creator_queries_return_all_pages_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalRepository(Path(tmp) / "data.sqlite3")
+            repo.save_creator(Creator(service="fanbox", creator_id="1234", name="Alice"))
+            repo.follow("fanbox", "1234")
+            posts = [
+                Post(service="fanbox", creator_id="1234", post_id=str(index),
+                     title=f"Post {index}", published=f"2026-01-{index % 28 + 1:02d}")
+                for index in range(175)
+            ]
+            repo.save_posts(posts)
+
+            self.assertEqual(len(repo.following_feed()), 175)
+            self.assertEqual(len(repo.posts_for_creator("fanbox", "1234")), 175)
+            self.assertEqual(len(repo.following_feed(limit=25)), 25)
+
+    def test_mod_creator_evidence_is_scoped_to_selected_game(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalRepository(Path(tmp) / "data.sqlite3")
+            genshin = Post(service="fanbox", creator_id="alice", post_id="1", title="Raiden")
+            starrail = Post(service="fanbox", creator_id="alice", post_id="2", title="Kafka")
+            repo.save_mod_creator_evidence(genshin, "raiden.zip", ["Raiden.ini"], game_key="genshin", game_name="원신")
+            repo.save_mod_creator_evidence(starrail, "kafka.zip", ["Kafka.ini"], game_key="starrail", game_name="붕괴: 스타레일")
+            self.assertEqual(len(repo.mod_creator_candidates(game_key="genshin")), 1)
+            self.assertEqual(repo.mod_creator_evidence_for_creator("fanbox", "alice")[0]["game_key"], "starrail")
+            candidates = repo.mod_creator_candidates()
+            self.assertEqual(len(candidates), 2)
+            self.assertEqual(
+                {candidate["game_key"] for candidate in candidates},
+                {"genshin", "starrail"},
+            )
+    def test_follow_unknown_creator_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalRepository(Path(tmp) / "data.sqlite3")
+            with self.assertRaises(KeyError):
+                repo.follow("fanbox", "missing")
+
+
+class MegaDownloadTests(unittest.TestCase):
+    def test_mega_public_file_download_streams_and_verifies_mac(self):
+        from Crypto.Cipher import AES
+        from mega.crypto import a32_to_base64, a32_to_str, base64_url_encode, encrypt_attr, str_to_a32
+
+        from pawchive_app.downloads import download_mega_file
+
+        plain = b"MEGA streaming test payload for a public shared file."
+        derived_key = (0x11223344, 0x22334455, 0x33445566, 0x44556677)
+        iv0, iv1 = 0x12345678, 0x23456789
+        key_bytes = a32_to_str(derived_key)
+        iv_bytes = a32_to_str((iv0, iv1, iv0, iv1))
+
+        padded = plain + (b"\x00" * ((-len(plain)) % 16))
+        chunk_mac_cipher = AES.new(key_bytes, AES.MODE_CBC, iv=iv_bytes)
+        chunk_mac = chunk_mac_cipher.encrypt(padded)[-16:]
+        file_mac = AES.new(key_bytes, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(chunk_mac)
+        words = str_to_a32(file_mac)
+        meta_mac = (words[0] ^ words[1], words[2] ^ words[3])
+
+        key_words = (
+            derived_key[0] ^ iv0,
+            derived_key[1] ^ iv1,
+            derived_key[2] ^ meta_mac[0],
+            derived_key[3] ^ meta_mac[1],
+            iv0, iv1, meta_mac[0], meta_mac[1],
+        )
+        file_key = a32_to_base64(key_words)
+        encrypted_attr = base64_url_encode(
+            encrypt_attr({"n": "sample-mod-pack.zip"}, derived_key)
+        )
+        from Crypto.Util import Counter
+        counter = Counter.new(
+            128,
+            initial_value=int.from_bytes(
+                a32_to_str((iv0, iv1, 0, 0)), "big"
+            ),
+        )
+        encrypted_payload = AES.new(
+            key_bytes, AES.MODE_CTR, counter=counter
+        ).encrypt(plain)
+
+        class FakeResponse:
+            headers = {"content-length": str(len(encrypted_payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_raw(self, chunk_size=None):
+                yield encrypted_payload[:5]
+                yield encrypted_payload[5:23]
+                yield encrypted_payload[23:]
+
+        class FakeHttp:
+            def stream(self, method, url, timeout=None):
+                self.request = (method, url, timeout)
+                return FakeResponse()
+
+            def close(self):
+                self.closed = True
+
+        class FakeMega:
+            def __init__(self):
+                self._http = FakeHttp()
+                self._http.closed = False
+
+            def _api_request(self, payload):
+                self.api_payload = payload
+                return {
+                    "g": ["http://gfs270n457.userstorage.mega.co.nz/dl/public-file"],
+                    "s": len(plain),
+                    "at": encrypted_attr,
+                }
+
+        fake = FakeMega()
+        progress = []
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "mega.Mega", return_value=fake
+        ):
+            saved = download_mega_file(
+                "https://mega.nz/file/BzcjlbzZ#" + file_key,
+                tmp,
+                progress_callback=lambda current, total: progress.append((current, total)),
+            )
+
+            self.assertEqual(saved.name, "sample-mod-pack.zip")
+            self.assertEqual(saved.read_bytes(), plain)
+            self.assertEqual(fake.api_payload, {"a": "g", "g": 1, "p": "BzcjlbzZ"})
+            self.assertEqual(progress[-1], (len(plain), len(plain)))
+            self.assertEqual(
+                fake._http.request[1],
+                "https://gfs270n457.userstorage.mega.co.nz/dl/public-file",
+            )
+            self.assertTrue(fake._http.closed)
+
+    def test_mega_ctr_counter_places_iv_in_high_64_bits(self):
+        from mega.crypto import a32_to_str
+        from pawchive_app.downloads import _mega_ctr_initial_value
+
+        iv0, iv1 = 0x12345678, 0x23456789
+        expected = int.from_bytes(a32_to_str((iv0, iv1, 0, 0)), "big")
+        self.assertEqual(_mega_ctr_initial_value((iv0, iv1)), expected)
+
+    def test_mega_public_file_download_rejects_non_mega_hosts(self):
+        from pawchive_app.downloads import download_mega_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(DownloadError, "MEGA 공개 파일 링크"):
+                download_mega_file(
+                    "https://evil.example/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw",
+                    tmp,
+                )
+
+
+class MegaCdnHostTests(unittest.TestCase):
+    def test_single_mega_download_url_accepts_api_singleton_array(self):
+        from pawchive_app.downloads import _single_mega_download_url
+
+        url = "https://gfs123.userstorage.mega.co.nz/dl/file"
+        self.assertEqual(_single_mega_download_url(url), url)
+        self.assertEqual(_single_mega_download_url([url]), url)
+        self.assertEqual(_single_mega_download_url([[url]]), url)
+        with self.assertRaisesRegex(DownloadError, "CloudRAID"):
+            _single_mega_download_url([url, url])
+
+    def test_http_mega_storage_url_is_upgraded_to_https(self):
+        from pawchive_app.downloads import _normalize_mega_download_url
+
+        self.assertEqual(
+            _normalize_mega_download_url(
+                "http://gfs270n457.userstorage.mega.co.nz/dl/file?token=abc"
+            ),
+            "https://gfs270n457.userstorage.mega.co.nz/dl/file?token=abc",
+        )
+        self.assertEqual(
+            _normalize_mega_download_url(
+                "https://gfs270n457.userstorage.mega.co.nz/dl/file"
+            ),
+            "https://gfs270n457.userstorage.mega.co.nz/dl/file",
+        )
+
+    def test_http_non_mega_download_host_is_rejected(self):
+        from pawchive_app.downloads import _normalize_mega_download_url
+
+        with self.assertRaisesRegex(DownloadError, "허용되지 않은 다운로드 서버"):
+            _normalize_mega_download_url("http://evil.example/file")
+
+    def test_http_mega_download_with_credentials_or_nonstandard_port_is_rejected(self):
+        from pawchive_app.downloads import _normalize_mega_download_url
+
+        with self.assertRaises(DownloadError):
+            _normalize_mega_download_url(
+                "http://user:pass@gfs270n457.userstorage.mega.co.nz/file"
+            )
+        with self.assertRaises(DownloadError):
+            _normalize_mega_download_url(
+                "http://gfs270n457.userstorage.mega.co.nz:8080/file"
+            )
+
+    def test_mega_server_diagnostic_only_exposes_scheme_and_host(self):
+        from pawchive_app.downloads import _mega_download_server_identity
+
+        self.assertEqual(
+            _mega_download_server_identity(
+                "https://cdn.example/file?token=secret#private"
+            ),
+            "scheme=https, host=cdn.example",
+        )
+
+    def test_trusted_mega_download_hosts(self):
+        from pawchive_app.downloads import _is_trusted_mega_download_url as ok
+
+        self.assertTrue(ok("https://gfs270n123.userstorage.mega.io/abc/file"))
+        self.assertTrue(ok("https://gfs123.userstorage.mega.co.nz/dl/file"))
+        self.assertTrue(ok("https://g.api.mega.co.nz/cs/file"))
+        self.assertTrue(ok("https://mega.nz/dl/file"))
+
+    def test_untrusted_mega_download_hosts(self):
+        from pawchive_app.downloads import _is_trusted_mega_download_url as ok
+
+        self.assertFalse(ok("http://gfs1.userstorage.mega.io/file"))
+        self.assertFalse(ok("https://evilmega.io/file"))
+        self.assertFalse(ok("https://mega.io.evil.example/file"))
+        self.assertFalse(ok("https://user:pw@gfs1.userstorage.mega.io/file"))
+        self.assertFalse(ok("https://example.com/file"))
+
+
+class DownloadSafetyTests(unittest.TestCase):
+    def test_only_dedicated_pawchive_file_host_is_allowed(self):
+        self.assertEqual(
+            resolve_file_url("/data/ab/example.zip"),
+            "https://file.pawchive.pw/data/ab/example.zip",
+        )
+        self.assertEqual(
+            resolve_file_url("/data/ab/example.zip", filename="example.zip"),
+            "https://file.pawchive.pw/data/ab/example.zip?f=example.zip",
+        )
+        with self.assertRaises(DownloadError):
+            resolve_file_url("https://evil.example/data/example.zip")
+        with self.assertRaises(DownloadError):
+            resolve_file_url("/profile/example.zip")
+
+    def test_thumbnail_url_uses_pawchive_thumbnail_host(self):
+        self.assertEqual(
+            resolve_thumbnail_url("/data/ab/example.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg?f=example.jpg",
+        )
+        self.assertEqual(
+            resolve_thumbnail_url("https://file.pawchive.pw/data/ab/example.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg?f=example.jpg",
+        )
+        self.assertEqual(
+            resolve_thumbnail_url("https://img.pawchive.pw/thumbnail/data/ab/example.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/example.jpg?f=example.jpg",
+        )
+        with self.assertRaises(DownloadError):
+            resolve_thumbnail_url("https://evil.example/data/image.png")
+        with self.assertRaises(DownloadError):
+            resolve_thumbnail_url("/data/../secret.jpg")
+
+    def test_thumbnail_url_includes_original_filename(self):
+        self.assertEqual(
+            resolve_thumbnail_url("/data/ab/image.jpg", filename="original name.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/ab/image.jpg?f=original+name.jpg",
+        )
+
+    @patch("pawchive_app.downloads._curl_transfer")
+    def test_file_download_uses_identified_http1_curl_transport_and_filename(self, mock_curl):
+        def save_test_payload(url, destination, timeout, session_cookie=None, **kwargs):
+            Path(destination).write_bytes(b"pawchive-test")
+
+        mock_curl.side_effect = save_test_payload
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "original.bin"
+            saved = download_file(
+                "/data/ab/original.bin",
+                target,
+                filename="original.bin",
+            )
+            self.assertEqual(saved.read_bytes(), b"pawchive-test")
+            self.assertIn("?f=original.bin", mock_curl.call_args.args[0])
+
+    def test_html_attachment_path_maps_to_thumbnail_host_with_filename(self):
+        self.assertEqual(
+            pawchive_image_url("/f6/bb/image.jpg", "preview image.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/f6/bb/image.jpg?f=preview+image.jpg",
+        )
+        self.assertEqual(
+            pawchive_image_url("https://pawchive.pw/data/f6/bb/image.jpg", "image.jpg"),
+            "https://img.pawchive.pw/thumbnail/data/f6/bb/image.jpg?f=image.jpg",
+        )
+
+    def test_thumbnail_fetch_uses_curl_and_reuses_cache(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/cache-image-v2.jpg?f=cache-image-v2.jpg"
+        with patch("pawchive_app.downloads._curl_transfer") as curl_transfer:
+            curl_transfer.side_effect = lambda _url, destination, _timeout, session_cookie=None, **kwargs: Path(destination).write_bytes(b"thumbnail")
+            result = fetch_thumbnail_bytes(url)
+            again = fetch_thumbnail_bytes(url)
+        self.assertEqual(result, b"thumbnail")
+        self.assertEqual(again, b"thumbnail")
+        curl_transfer.assert_called_once()
+
+    def test_thumbnail_fetch_persists_cache_between_sessions(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/disk-cache-speed-v3.jpg?f=disk-cache-speed-v3.jpg"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            with patch("pawchive_app.downloads._curl_transfer") as transfer:
+                transfer.side_effect = lambda _url, destination, _timeout, **kwargs: Path(destination).write_bytes(b"cached-thumbnail")
+                self.assertEqual(fetch_thumbnail_bytes(url), b"cached-thumbnail")
+                transfer.assert_called_once()
+
+            key = downloads._thumbnail_cache_key(url, None)
+            cache_path = downloads._thumbnail_cache_path(key)
+            self.assertTrue(cache_path.is_file())
+
+            with downloads._THUMB_CACHE_LOCK:
+                removed = downloads._THUMB_CACHE.pop(key, None)
+                if removed is not None:
+                    downloads._THUMB_CACHE_SIZE -= len(removed)
+            with patch("pawchive_app.downloads._curl_transfer", side_effect=AssertionError("disk cache should be used")):
+                self.assertEqual(fetch_thumbnail_bytes(url), b"cached-thumbnail")
+
+    def test_simultaneous_thumbnail_requests_share_one_transfer(self):
+        url = "https://img.pawchive.pw/thumbnail/data/test/shared-thumbnail-v3.jpg?f=shared-thumbnail-v3.jpg"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            with patch("pawchive_app.downloads._curl_transfer") as transfer:
+                def save_payload(_url, destination, _timeout, **kwargs):
+                    time.sleep(0.2)
+                    Path(destination).write_bytes(b"shared-thumbnail")
+                transfer.side_effect = save_payload
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(lambda _index: fetch_thumbnail_bytes(url), range(2)))
+                self.assertEqual(results, [b"shared-thumbnail", b"shared-thumbnail"])
+                transfer.assert_called_once()
+
+    @patch("pawchive_app.downloads._wait_download_slot")
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads._find_curl", return_value="curl.exe")
+    def test_thumbnail_transfer_skips_file_host_request_gate(
+        self, _mock_curl, mock_run, mock_request_gate
+    ):
+        def fake_run(command, **_kwargs):
+            header_path = Path(command[command.index("-D") + 1])
+            output_path = Path(command[command.index("-o") + 1])
+            header_path.write_text(
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n",
+                encoding="ascii",
+            )
+            output_path.write_bytes(b"abcdef")
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "thumbnail.bin"
+            from pawchive_app.downloads import _curl_transfer
+            _curl_transfer(
+                "https://img.pawchive.pw/thumbnail/data/ab/image.jpg?f=image.jpg",
+                target,
+                30,
+                resume=False,
+                attempts=1,
+            )
+            self.assertEqual(target.read_bytes(), b"abcdef")
+        mock_request_gate.assert_not_called()
+
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads.shutil.which", return_value="curl.exe")
+    def test_curl_transport_uses_http11_and_identifiable_user_agent(
+        self, _mock_which, mock_run
+    ):
+        def fake_run(command, **_kwargs):
+            header_path = Path(command[command.index("-D") + 1])
+            output_path = Path(command[command.index("-o") + 1])
+            header_path.write_text(
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n",
+                encoding="ascii",
+            )
+            output_path.write_bytes(b"abcdef")
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "curl.bin"
+            from pawchive_app.downloads import _curl_transfer
+            _curl_transfer(
+                "https://file.pawchive.pw/data/ab/curl.bin?f=curl.bin",
+                target,
+                60,
+                resume=False,
+            )
+            self.assertEqual(target.read_bytes(), b"abcdef")
+        command = mock_run.call_args.args[0]
+        self.assertIn("--http1.1", command)
+        self.assertIn("-4", command)
+        self.assertTrue(any(str(item).startswith("User-Agent: PawchiveModFinder/") for item in command))
+        self.assertIn("-f", command)
+
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads.shutil.which", return_value="curl.exe")
+    def test_curl_376_byte_antibot_placeholder_is_not_saved(self, _mock_which, mock_run):
+        def fake_run(command, **_kwargs):
+            header_path = Path(command[command.index("-D") + 1])
+            output_path = Path(command[command.index("-o") + 1])
+            header_path.write_text(
+                "HTTP/1.1 200 OK\r\nContent-Length: 376\r\n",
+                encoding="ascii",
+            )
+            output_path.write_bytes(b"x" * 376)
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "blocked.bin"
+            from pawchive_app.downloads import _curl_transfer
+            with self.assertRaisesRegex(DownloadError, "376바이트"):
+                _curl_transfer(
+                    "https://file.pawchive.pw/data/ab/blocked.bin?f=blocked.bin",
+                    target,
+                    60,
+                    resume=False,
+                )
+            self.assertFalse(target.exists())
+
+    @patch("pawchive_app.downloads._browser_transfer")
+    @patch("pawchive_app.downloads.subprocess.run")
+    @patch("pawchive_app.downloads._find_curl", return_value="curl.exe")
+    def test_curl_connection_reset_falls_back_to_identified_browser_transport(
+        self, _mock_curl, mock_run, mock_browser
+    ):
+        class Result:
+            returncode = 35
+            stdout = ""
+            stderr = "curl: (35) Recv failure: Connection was reset"
+
+        mock_run.return_value = Result()
+
+        def save_test_payload(url, destination, timeout, session_cookie=None):
+            Path(destination).write_bytes(b"browser-payload")
+
+        mock_browser.side_effect = save_test_payload
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "fallback.bin"
+            _curl_transfer(
+                "https://file.pawchive.pw/data/ab/fallback.bin?f=fallback.bin",
+                target,
+                10,
+                resume=False,
+                attempts=1,
+            )
+            self.assertEqual(target.read_bytes(), b"browser-payload")
+        mock_browser.assert_called_once()
+        self.assertEqual(mock_browser.call_args.args[0],
+                         "https://file.pawchive.pw/data/ab/fallback.bin?f=fallback.bin")
+
+    def test_zip_extracts_inside_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "safe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("folder/mod.txt", "safe")
+            output = Path(tmp) / "out"
+            extracted = safe_extract_zip(archive, output)
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual((output / "folder" / "mod.txt").read_text(), "safe")
+
+    def test_downloaded_zip_is_extracted_and_original_archive_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "sample-mod.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("ModFolder/mod.ini", "[Mod]")
+
+            extraction_dir, extracted = extract_archive_and_remove(archive)
+
+            self.assertFalse(archive.exists())
+            self.assertEqual(extraction_dir, Path(tmp) / "sample-mod_extracted")
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual(
+                (extraction_dir / "ModFolder" / "mod.ini").read_text(),
+                "[Mod]",
+            )
+
+    def test_non_archive_download_is_left_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            download = Path(tmp) / "readme.txt"
+            download.write_text("not an archive")
+
+            extraction_dir, extracted = extract_archive_and_remove(download)
+
+            self.assertIsNone(extraction_dir)
+            self.assertEqual(extracted, [])
+            self.assertTrue(download.exists())
+
+    def test_single_file_compressions_are_extracted_and_originals_removed(self):
+        payload = b"decompressed mod payload"
+        cases = (
+            ("opaque-download", gzip.compress(payload), "opaque-download.decompressed"),
+            ("sample.bin.bz2", bz2.compress(payload), "sample.bin"),
+            ("sample.bin.xz", lzma.compress(payload), "sample.bin"),
+        )
+
+        for filename, compressed, output_name in cases:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                archive = Path(tmp) / filename
+                archive.write_bytes(compressed)
+
+                extraction_dir, extracted = extract_archive_and_remove(archive)
+
+                self.assertFalse(archive.exists())
+                self.assertEqual(len(extracted), 1)
+                self.assertEqual(extracted[0].name, output_name)
+                self.assertEqual(extracted[0].read_bytes(), payload)
+                self.assertEqual(extraction_dir, Path(tmp) / f"{Path(filename).stem}_extracted")
+
+    def test_downloaded_7z_is_extracted_and_original_archive_removed(self):
+        try:
+            import py7zr
+        except ImportError:
+            self.skipTest("py7zr is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "mod.ini"
+            source.write_text("[Mod]")
+            archive = Path(tmp) / "sample-mod.7z"
+            with py7zr.SevenZipFile(archive, mode="w") as seven:
+                seven.write(source, arcname="ModFolder/mod.ini")
+
+            extraction_dir, extracted = extract_archive_and_remove(archive)
+
+            self.assertFalse(archive.exists())
+            self.assertEqual(extraction_dir, Path(tmp) / "sample-mod_extracted")
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual(
+                (extraction_dir / "ModFolder" / "mod.ini").read_text(),
+                "[Mod]",
+            )
+
+    def test_zip_traversal_is_rejected_before_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("../escape.txt", "unsafe")
+            with self.assertRaises(DownloadError):
+                safe_extract_zip(archive, Path(tmp) / "out")
+            self.assertFalse((Path(tmp) / "escape.txt").exists())
+
+    def test_tar_extraction_and_traversal_protection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "safe.tar.gz"
+            source_file = Path(tmp) / "source.txt"
+            source_file.write_text("safe")
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(source_file, arcname="nested/source.txt")
+            output = Path(tmp) / "out"
+            extracted = safe_extract_archive(archive, output)
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual((output / "nested" / "source.txt").read_text(), "safe")
+
+    def test_tar_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.tar"
+            source_file = Path(tmp) / "payload.txt"
+            source_file.write_text("unsafe")
+            with tarfile.open(archive, "w") as tar:
+                info = tarfile.TarInfo("../escape.txt")
+                info.size = source_file.stat().st_size
+                with source_file.open("rb") as payload:
+                    tar.addfile(info, payload)
+            with self.assertRaises(DownloadError):
+                safe_extract_archive(archive, Path(tmp) / "out")
+            self.assertFalse((Path(tmp) / "escape.txt").exists())
+
+
+class UpdaterTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.manager = UpdateManager(root / "roaming", root / "local")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _make_archive(self, extra_entries=None):
+        prefix = "nothing-feature/GameModFinder_0.1.4/GameModFinder/"
+        files = {
+            "main_v2.py": "print('app')",
+            "run.bat": "@echo off",
+            "requirements.txt": "PySide6",
+            "pawchive_app/ui.py": "# ui",
+            "pawchive_app/updater.py": "# updater",
+        }
+        if extra_entries:
+            files.update(extra_entries)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, text in files.items():
+                archive.writestr(prefix + name, text)
+        return buffer.getvalue()
+
+    def test_check_detects_new_branch_commit(self):
+        latest = "a" * 40
+        with patch.object(
+            self.manager,
+            "_request_bytes",
+            return_value=json.dumps({"sha": latest}).encode("utf-8"),
+        ) as request:
+            result = self.manager.check()
+        self.assertEqual(result.installed_commit, BASELINE_COMMIT)
+        self.assertEqual(result.latest_commit, latest)
+        self.assertTrue(result.available)
+        self.assertIn("feature%2Fpawchive-mod-finder-v2", request.call_args.args[0])
+
+    def test_check_reports_up_to_date_after_commit_marker_is_written(self):
+        latest = "b" * 40
+        self.manager.installed_commit_path.write_text(latest, encoding="ascii")
+        with patch.object(
+            self.manager,
+            "_request_bytes",
+            return_value=json.dumps({"sha": latest}).encode("utf-8"),
+        ):
+            result = self.manager.check()
+        self.assertFalse(result.available)
+
+    def test_check_rejects_invalid_github_response(self):
+        with patch.object(
+            self.manager, "_request_bytes", return_value=b'{"sha":"not-a-sha"}'
+        ):
+            with self.assertRaisesRegex(RuntimeError, "올바른 업데이트 버전"):
+                self.manager.check()
+
+    def test_prepare_extracts_only_the_app_folder(self):
+        payload = self._make_archive({"tests/test_example.py": "pass"})
+        with patch.object(self.manager, "_request_bytes", return_value=payload):
+            package = self.manager.prepare("c" * 40)
+        self.assertTrue((package.staged_app / "main_v2.py").is_file())
+        self.assertTrue((package.staged_app / "pawchive_app" / "updater.py").is_file())
+        self.assertTrue((package.staged_app / "tests" / "test_example.py").is_file())
+        self.assertFalse((package.staged_app.parent / "outside.txt").exists())
+
+    def test_prepare_rejects_path_traversal(self):
+        payload = self._make_archive({"../outside.txt": "not allowed"})
+        with patch.object(self.manager, "_request_bytes", return_value=payload):
+            with self.assertRaisesRegex(RuntimeError, "안전하지 않은 파일 경로"):
+                self.manager.prepare("d" * 40)
+
+    def test_prepare_rejects_unexpected_archive_layout(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("wrong-root/main_v2.py", "print('no')")
+        with patch.object(self.manager, "_request_bytes", return_value=buffer.getvalue()):
+            with self.assertRaisesRegex(RuntimeError, "GameModFinder 폴더"):
+                self.manager.prepare("e" * 40)
+
+    def test_windows_update_helper_is_valid_python(self):
+        compile(_APPLY_HELPER, "apply_update.py", "exec")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class SearchFieldScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.post = Post.from_api({
+            "id": "search-1",
+            "service": "fanbox",
+            "user": "creator-1",
+            "title": "Raiden Shogun Outfit",
+            "content": "<p>New texture pack for Furina</p>",
+        })
+
+    def test_title_only_uses_title(self):
+        self.assertTrue(post_matches_search_fields(
+            self.post, "Raiden Shogun", include_title=True, include_content=False
+        ))
+        self.assertFalse(post_matches_search_fields(
+            self.post, "Furina", include_title=True, include_content=False
+        ))
+
+    def test_content_only_uses_body(self):
+        self.assertTrue(post_matches_search_fields(
+            self.post, "Furina texture", include_title=False, include_content=True
+        ))
+        self.assertFalse(post_matches_search_fields(
+            self.post, "Raiden", include_title=False, include_content=True
+        ))
+
+    def test_both_fields_preserve_combined_search(self):
+        self.assertTrue(post_matches_search_fields(
+            self.post, "Shogun Furina", include_title=True, include_content=True
+        ))
+        self.assertFalse(post_matches_search_fields(
+            self.post, "Furina", include_title=True, include_content=False
+        ))
+
+
+class ArchiveIniInspectionTests(unittest.TestCase):
+    def test_zip_ini_is_found_without_extracting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "mod.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("Character/Character.ini", "[Constants]")
+                zipped.writestr("README.txt", "Install guide")
+            result = analyze_archive_for_ini(archive)
+            self.assertEqual(result.archive_format, "ZIP")
+            self.assertEqual(result.member_count, 2)
+            self.assertEqual(result.ini_count, 1)
+            self.assertEqual(result.ini_files, ("Character/Character.ini",))
+            self.assertEqual(set(Path(tmp).iterdir()), {archive})
+
+    def test_ini_extension_check_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "mod.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("mods/CONFIG.INI", "data")
+            result = analyze_archive_for_ini(archive)
+            self.assertEqual(result.ini_count, 1)
+
+    def test_windows_backslash_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr(r"..\\outside.ini", "bad")
+            with self.assertRaises(ArchiveInspectionError):
+                analyze_archive_for_ini(archive)
+
+    def test_unsafe_member_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("../outside.ini", "bad")
+            with self.assertRaises(ArchiveInspectionError):
+                analyze_archive_for_ini(archive)
+
+    def test_tar_ini_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "mod.tar.gz"
+            source = Path(tmp) / "sample.ini"
+            source.write_text("[General]", encoding="utf-8")
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(source, arcname="Game/sample.ini")
+            result = analyze_archive_for_ini(archive)
+            self.assertEqual(result.archive_format, "TAR")
+            self.assertEqual(result.ini_count, 1)
+
+
+class ModCreatorEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.repository = LocalRepository(Path(self.temp.name) / "test.sqlite3")
+        self.post = Post.from_api({
+            "id": "post-ini-1",
+            "service": "fanbox",
+            "user": "creator-ini",
+            "title": "Character mod pack",
+        })
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_ini_evidence_is_grouped_by_creator_and_is_idempotent(self):
+        self.repository.save_mod_creator_evidence(
+            self.post, "character.zip", ["Game/Character.ini"], 1
+        )
+        self.repository.save_mod_creator_evidence(
+            self.post, "character.zip", ["Game/Character.ini"], 1
+        )
+        candidates = self.repository.mod_creator_candidates()
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["service"], "fanbox")
+        self.assertEqual(candidates[0]["creator_id"], "creator-ini")
+        self.assertEqual(candidates[0]["evidence_count"], 1)
+        evidence = self.repository.mod_creator_evidence_for_creator(
+            "fanbox", "creator-ini"
+        )
+        self.assertEqual(len(evidence), 1)
+        self.assertIn("Character.ini", evidence[0]["ini_files_json"])
