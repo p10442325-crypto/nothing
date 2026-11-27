@@ -1170,33 +1170,6 @@ class MainWindow(QMainWindow):
         self.creator_browser.set_posts(cached_posts)
         self._load_creator_tags(service, creator_id)
 
-        # Older local records may have been saved from lightweight list
-        # responses before attachment details were fetched.
-        if any(PawchiveClient._post_needs_detail(post) for post in cached_posts):
-            owner = (service, creator_id)
-
-            def hydrate_cached_posts():
-                with self._client() as client:
-                    completed = client.complete_post_metadata(cached_posts)
-                    failures = client.last_detail_failures
-                self.database.save_posts(completed)
-                return completed, failures
-
-            def cached_posts_hydrated(result):
-                completed, failures = result
-                if self._creator_tag_owner != owner:
-                    return
-                self.creator_browser.set_posts(completed)
-                suffix = f" · 상세정보 실패 {failures}개" if failures else ""
-                self.status.setText(
-                    f"크리에이터 게시물 첨부정보 확인 완료{suffix}"
-                )
-
-            self._run_task(
-                "저장된 게시물의 첨부파일 정보 보완 중…",
-                hydrate_cached_posts,
-                cached_posts_hydrated,
-            )
 
     def _load_creator_tags(self, service: str, creator_id: str) -> None:
         owner = (service, creator_id)
