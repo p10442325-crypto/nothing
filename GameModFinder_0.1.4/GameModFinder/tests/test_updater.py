@@ -98,6 +98,59 @@ class UpdateManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "GameModFinder 폴더"):
                 self.manager.prepare(LATEST)
 
+    def test_helper_continues_if_app_exited_before_open_process(self):
+        import ctypes
+        from types import SimpleNamespace
+
+        class FakeFunction:
+            def __init__(self, result=None):
+                self.result = result
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.result
+
+        kernel32 = SimpleNamespace(
+            OpenProcess=FakeFunction(None),
+            WaitForSingleObject=FakeFunction(0),
+            CloseHandle=FakeFunction(None),
+        )
+        namespace = {"__name__": "apply_update_test"}
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "update.log"
+            namespace["log_path"] = log_path
+            with patch.object(ctypes, "WinDLL", return_value=kernel32, create=True), patch.object(
+                ctypes, "get_last_error", return_value=87, create=True
+            ):
+                exec(_APPLY_HELPER, namespace)
+                namespace["wait_for_parent"](1234)
+
+            self.assertIn(
+                "has already exited; continuing update",
+                log_path.read_text(encoding="utf-8"),
+            )
+
+    def test_helper_rejects_non_positive_process_id(self):
+        import ctypes
+        from types import SimpleNamespace
+
+        class FakeFunction:
+            def __init__(self):
+                self.argtypes = None
+                self.restype = None
+
+        kernel32 = SimpleNamespace(
+            OpenProcess=FakeFunction(),
+            WaitForSingleObject=FakeFunction(),
+            CloseHandle=FakeFunction(),
+        )
+        namespace = {"__name__": "apply_update_test"}
+        with patch.object(ctypes, "WinDLL", return_value=kernel32, create=True):
+            exec(_APPLY_HELPER, namespace)
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                namespace["wait_for_parent"](0)
+
     def test_windows_update_helper_is_valid_python(self):
         compile(_APPLY_HELPER, "apply_update.py", "exec")
 
