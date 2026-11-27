@@ -658,6 +658,27 @@ def _is_trusted_mega_download_url(url: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in MEGA_CDN_DOMAINS)
 
 
+def _single_mega_download_url(value: object) -> str:
+    """Normalize MEGA's one-URL response, including the API's singleton-array form.
+
+    MEGA can return the ``g`` field as either a URL string or an array of
+    URLs. The existing streaming/decryption code supports a single endpoint;
+    CloudRAID responses with multiple endpoints must not be mistaken for one
+    URL or bypass the trusted-host check.
+    """
+    while isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            raise DownloadError(
+                "MEGA가 여러 다운로드 서버 주소(CloudRAID)를 반환했습니다. "
+                "현재 버전은 단일 서버 다운로드만 지원합니다."
+            )
+        value = value[0]
+
+    if not isinstance(value, str) or not value.strip():
+        raise DownloadError("MEGA에서 다운로드 서버 주소를 받지 못했습니다.")
+    return value.strip()
+
+
 def download_mega_file(
     url: str,
     destination_dir: str | Path,
@@ -736,7 +757,7 @@ def download_mega_file(
         ):
             raise DownloadError("MEGA에서 공개 파일 정보를 받지 못했습니다.")
 
-        file_url = str(file_data["g"])
+        file_url = _single_mega_download_url(file_data["g"])
         if not _is_trusted_mega_download_url(file_url):
             raise DownloadError("MEGA가 안전하지 않은 다운로드 서버 주소를 반환했습니다.")
 
