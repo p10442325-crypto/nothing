@@ -207,7 +207,7 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(browser.list_count.text(), "1개")
         browser._populate_attachment_cards(post)
         self.assertEqual(len(browser.attachment_buttons), 1)
-        self.assertEqual(browser.attachment_buttons[0].text(), "링크 열기")
+        self.assertEqual(browser.attachment_buttons[0].text(), "앱에서 다운로드")
         browser.close()
 
     def test_post_browser_appends_next_page_without_resetting_local_search(self):
