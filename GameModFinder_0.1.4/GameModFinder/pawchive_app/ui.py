@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import PawchiveClient, PawchiveError
-from .downloads import (DownloadError, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
+from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url, post_matches_search_fields
 from .creator_discovery import parse_search_queries, scan_mod_creator_candidates
 from .repository import LocalRepository
