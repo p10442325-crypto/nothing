@@ -65,8 +65,8 @@ class CreatorDiscoveryTests(unittest.TestCase):
             "file": {"name": "bundle.zip", "path": "/data/bb/bundle.zip"},
         })
         pages = {
-            ("Tifa Lockhart", 0): [ini_post, content_only_post],
-            ("Tifa Lockhart", 50): [],
+            ("Tifa Lockhart", 0): [ini_post] * 50,
+            ("Tifa Lockhart", 50): [content_only_post],
         }
         client = FakeClient(pages)
         repository = FakeRepository()
