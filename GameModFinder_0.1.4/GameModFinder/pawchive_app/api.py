@@ -371,6 +371,46 @@ class PawchiveClient:
         raise PawchiveError("게시물 상세 응답에서 요청한 게시물을 찾지 못했습니다.")
 
     @staticmethod
+    def post_page_html(self, service: str, creator_id: str, post_id: str) -> str:
+        """Fetch the rendered Pawchive post page for links omitted from its JSON API."""
+        url = (
+            f"https://pawchive.pw/{quote(service, safe='')}/user/"
+            f"{quote(creator_id, safe='')}/post/{quote(post_id, safe='')}"
+        )
+        elapsed = time.monotonic() - self._last_request
+        if elapsed < self.min_interval:
+            time.sleep(self.min_interval - elapsed)
+        request = Request(
+            url,
+            headers={"Accept": "text/html,application/xhtml+xml", "User-Agent": self.user_agent},
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                self._last_request = time.monotonic()
+                return response.read().decode("utf-8", "replace")
+        except HTTPError as exc:
+            self._last_request = time.monotonic()
+            if exc.code == 404:
+                raise PawchiveError("Pawchive 게시물 페이지를 찾지 못했습니다 (HTTP 404).") from exc
+            if exc.code == 429:
+                raise PawchiveError("Pawchive 요청 제한(429)에 도달했습니다. 잠시 후 다시 시도해 주세요.") from exc
+            if exc.code not in (403, 500, 502, 503, 520, 521, 522, 524):
+                raise PawchiveError(f"Pawchive 게시물 페이지 오류: HTTP {exc.code}") from exc
+            python_error: Exception = exc
+        except (URLError, TimeoutError, OSError) as exc:
+            self._last_request = time.monotonic()
+            python_error = exc
+
+        try:
+            self._last_request = time.monotonic()
+            return self._browser_get_text(url)
+        except PawchiveError as browser_error:
+            raise PawchiveError(
+                "Pawchive 게시물 페이지를 가져오지 못했습니다. "
+                f"Python 연결: {python_error}. 브라우저 재시도: {browser_error}"
+            ) from browser_error
+
     def _post_needs_detail(post: Post) -> bool:
         """Expand incomplete list records and deferred archives, not full posts.
 
