@@ -1196,18 +1196,18 @@ def safe_extract_archive(archive_path: str | Path, destination: str | Path) -> l
 
     # Detect 7Z and RAR from their signatures as well as extensions. This also
     # handles download endpoints that provide a generic or extensionless name.
-    if signature.startswith(b"7z\\xbc\\xaf\\x27\\x1c") or suffix == ".7z":
+    if signature.startswith(b"7z\xbc\xaf\x27\x1c") or suffix == ".7z":
         return safe_extract_7z(archive, destination)
-    if signature.startswith(b"Rar!\\x1a\\x07") or suffix == ".rar":
+    if signature.startswith(b"Rar!\x1a\x07") or suffix == ".rar":
         return safe_extract_rar(archive, destination)
 
     # TAR archives were handled above. These branches cover standalone compressed
     # files (for example a .gz containing one DLL rather than a .tar.gz archive).
-    if signature.startswith(b"\\x1f\\x8b") or suffix == ".gz":
+    if signature.startswith(b"\x1f\x8b") or suffix == ".gz":
         return _extract_compressed_stream(archive, destination, gzip.open, ".gz")
     if signature.startswith(b"BZh") or suffix == ".bz2":
         return _extract_compressed_stream(archive, destination, bz2.open, ".bz2")
-    if signature.startswith(b"\\xfd7zXZ\\x00") or suffix == ".xz":
+    if signature.startswith(b"\xfd7zXZ\x00") or suffix == ".xz":
         return _extract_compressed_stream(archive, destination, lzma.open, ".xz")
 
     known_archive_suffixes = (
