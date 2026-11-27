@@ -32,10 +32,16 @@ class Attachment:
             name = _string(
                 value.get("name") or value.get("filename")
                 or value.get("original_name") or value.get("file_name")
+                or value.get("original_filename") or value.get("filename_orig")
             )
+            # Pawchive may expose over-limit files through a temporary URL.
+            # Such URLs are valid file sources even when "deferred" is absent.
             path = _string(
                 value.get("path") or value.get("url")
-                or value.get("download_url") or value.get("href")
+                or value.get("download_url") or value.get("temp_url")
+                or value.get("temporary_url") or value.get("file_url")
+                or value.get("original_url") or value.get("download_path")
+                or value.get("temp_path") or value.get("href")
             )
             if not path:
                 nested = value.get("file")
@@ -51,7 +57,7 @@ class Attachment:
         if not name:
             query_names = parse_qs(parsed.query)
             name = next(
-                (query_names[key][0] for key in ("f", "filename", "name")
+                (query_names[key][0] for key in ("f", "filename", "name", "file")
                  if query_names.get(key)),
                 "",
             )
@@ -137,9 +143,9 @@ class Post:
 
         add_attachment(value.get("file"), "file")
 
-        # Accept both arrays and filename-keyed maps. Some API responses use
-        # "files" while others use "attachments".
-        for field_name in ("attachments", "files"):
+        # Pawchive exposes three distinct attachment sources. In particular,
+        # inline files can be separate from the main file and regular attachments.
+        for field_name in ("attachments", "files", "inline"):
             raw_items = value.get(field_name)
             if isinstance(raw_items, list):
                 for item in raw_items:
@@ -159,6 +165,42 @@ class Post:
                             add_attachment(normalized, field_name)
 
         add_attachment(value.get("shared_file"), "shared_file")
+
+        # Some inline attachments are represented as download links inside the
+        # post body rather than as objects in the API's "inline" array.
+        archive_suffixes = (
+            ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
+            ".tgz", ".tbz2", ".txz",
+        )
+        anchor_pattern = re.compile(
+            r"""<a\\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""",
+            flags=re.I | re.S,
+        )
+        for href, label in anchor_pattern.findall(_string(value.get("content"))):
+            clean_href = html.unescape(href).strip()
+            label_text = re.sub(r"<[^>]*>", " ", label)
+            label_text = " ".join(html.unescape(label_text).split())
+            parsed_href = urlparse(clean_href)
+            host = (parsed_href.hostname or "").lower()
+            safe_host = host in {"pawchive.pw", "www.pawchive.pw", "file.pawchive.pw"}
+            safe_path = (
+                not parsed_href.scheme
+                and not parsed_href.netloc
+                and (
+                    parsed_href.path.startswith("/data/")
+                    or re.match(r"^/[0-9a-f]{2,}/[0-9a-f]{2,}/", parsed_href.path, re.I)
+                )
+            )
+            if not (safe_host or safe_path):
+                continue
+            candidate_name = label_text or unquote(parsed_href.path.rsplit("/", 1)[-1])
+            if not candidate_name.casefold().endswith(archive_suffixes):
+                continue
+            attachment = Attachment.from_api(
+                {"name": candidate_name, "path": clean_href}, "inline"
+            )
+            if attachment and attachment.path not in {entry.path for entry in found}:
+                found.append(attachment)
 
         return cls(
             service=service,
