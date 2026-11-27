@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from .api import PawchiveClient, PawchiveError
 from .downloads import (DownloadError, download_file, download_mega_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
-from .models import Attachment, Creator, Post, is_mega_file_url, parse_creator_url, post_matches_search_fields
+from .models import (Attachment, Creator, Post, extract_mega_links_from_post_html, is_mega_file_url, parse_creator_url, post_matches_search_fields)
 from .creator_discovery import (
     game_search_terms, load_game_catalog, parse_search_queries, scan_mod_creator_candidates,
 )
@@ -1689,57 +1689,119 @@ class MainWindow(QMainWindow):
         folder.mkdir(parents=True, exist_ok=True)
 
         def task(report_progress):
-            if is_mega_link:
+            resolved_attachment = attachment
+            if not is_mega_link and (attachment.deferred or not attachment.path):
+                # Deferred Pawchive references deliberately omit their stable
+                # path. Resolve a fresh signed URL only when the user chooses
+                # to download that file, not while browsing the creator.
+                with self._client() as client:
+                    detail = client.post_detail(
+                        post.service, post.creator_id, post.post_id
+                    )
+                merged = dict(post.raw)
+                merged.update(detail)
+                merged.setdefault("id", post.post_id)
+                merged.setdefault("service", post.service)
+                merged.setdefault("user", post.creator_id)
+                refreshed_post = Post.from_api(
+                    merged,
+                    Creator(service=post.service, creator_id=post.creator_id),
+                )
+                self.database.save_posts([refreshed_post])
+                matches = [
+                    item for item in refreshed_post.files
+                    if item.name.casefold() == attachment.name.casefold()
+                    and item.path
+                ]
+                mega_matches = [
+                    item for item in refreshed_post.files
+                    if is_mega_file_url(item.path)
+                ]
+                if not matches and len(mega_matches) == 1:
+                    # Some detail responses expose the archived filename in
+                    # one field and the real MEGA URL as a separate link item.
+                    matches = mega_matches
+                if not matches and attachment.kind:
+                    matches = [
+                        item for item in refreshed_post.files
+                        if item.kind == attachment.kind and item.path
+                    ]
+                if not matches:
+                    raise DownloadError(
+                        "Pawchive에서 이 첨부파일의 실제 다운로드 주소를 찾지 못했습니다. "
+                        "게시물의 Downloads 영역도 확인했지만 연결된 MEGA 주소가 없었습니다."
+                    )
+                resolved_attachment = matches[0]
+
+            resolved_mega_url = (
+                resolved_attachment.path
+                if (
+                    resolved_attachment.kind == "external_link"
+                    or is_mega_file_url(resolved_attachment.path)
+                )
+                else ""
+            )
+            if resolved_mega_url:
                 def mega_progress(downloaded: int, total: int) -> None:
                     report_progress(
                         f"MEGA 다운로드 중… {downloaded / (1024 * 1024):.1f} / "
                         f"{total / (1024 * 1024):.1f} MiB"
                     )
                 saved = download_mega_file(
-                    attachment.path, folder, progress_callback=mega_progress
+                    resolved_mega_url, folder, progress_callback=mega_progress
                 )
             else:
-                resolved_attachment = attachment
-                if attachment.deferred or not attachment.path:
-                    # Deferred Pawchive references deliberately omit their stable
-                    # path. Resolve a fresh signed URL only when the user chooses
-                    # to download that file, not while browsing the creator.
+                try:
+                    saved = download_file(
+                        resolved_attachment.path, target,
+                        session_cookie=self.settings.get("session_key") or None,
+                        filename=attachment.name,
+                    )
+                except DownloadError as file_error:
+                    if "Pawchive 파일 서버 주소가 아닙니다." not in str(file_error):
+                        raise
+                    # The API can expose a placeholder/path while the actual
+                    # MEGA share is rendered in the post's Downloads section.
+                    # Resolve that page-only link at click time, then decrypt
+                    # and save the MEGA file inside this app.
+                    report_progress("게시물의 Downloads 영역에서 실제 링크 확인 중…")
                     with self._client() as client:
-                        detail = client.post_detail(
+                        page_html = client.post_page_html(
                             post.service, post.creator_id, post.post_id
                         )
-                    merged = dict(post.raw)
-                    merged.update(detail)
-                    merged.setdefault("id", post.post_id)
-                    merged.setdefault("service", post.service)
-                    merged.setdefault("user", post.creator_id)
-                    refreshed_post = Post.from_api(
-                        merged,
-                        Creator(service=post.service, creator_id=post.creator_id),
+                    links = extract_mega_links_from_post_html(
+                        page_html, post.post_url
                     )
-                    self.database.save_posts([refreshed_post])
-                    matches = [
-                        item for item in refreshed_post.files
-                        if item.name.casefold() == attachment.name.casefold()
-                        and item.path
-                    ]
-                    if not matches and attachment.kind:
-                        matches = [
-                            item for item in refreshed_post.files
-                            if item.kind == attachment.kind and item.path
-                        ]
-                    if not matches:
+                    if not links:
                         raise DownloadError(
-                            "Pawchive에서 이 지연 첨부파일의 임시 다운로드 주소를 "
-                            "가져오지 못했습니다. 게시물 원문에서 파일 상태를 확인해 주세요."
-                        )
-                    resolved_attachment = matches[0]
+                            "게시물의 Downloads 영역에서 유효한 MEGA 파일 링크를 찾지 못했습니다. "
+                            f"API 경로: {resolved_attachment.path}"
+                        ) from file_error
 
-                saved = download_file(
-                    resolved_attachment.path, target,
-                    session_cookie=self.settings.get("session_key") or None,
-                    filename=attachment.name,
-                )
+                    wanted = " ".join((attachment.name or "").casefold().split())
+                    matching = [
+                        item for item in links
+                        if " ".join((item[1] or "").casefold().split()) == wanted
+                        and wanted
+                    ]
+                    if len(matching) == 1:
+                        mega_url = matching[0][0]
+                    elif len(links) == 1:
+                        mega_url = links[0][0]
+                    else:
+                        raise DownloadError(
+                            "게시물에 MEGA 다운로드 링크가 여러 개 있어 "
+                            "선택한 첨부파일과 일치하는 링크를 특정하지 못했습니다."
+                        ) from file_error
+
+                    def mega_progress(downloaded: int, total: int) -> None:
+                        report_progress(
+                            f"MEGA 다운로드 중… {downloaded / (1024 * 1024):.1f} / "
+                            f"{total / (1024 * 1024):.1f} MiB"
+                        )
+                    saved = download_mega_file(
+                        mega_url, folder, progress_callback=mega_progress
+                    )
 
             extracted = []
             try:
