@@ -193,7 +193,7 @@ class UpdateManager:
             with zipfile.ZipFile(archive_path) as archive:
                 prefix, selected = self._find_app_prefix(archive)
                 for info in selected:
-                    relative = info.filename[len(prefix):]
+                    relative = info.filename[len(prefix):].replace("\\", "/")
                     destination = staged_app.joinpath(*PurePosixPath(relative).parts)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(info, "r") as source, destination.open("wb") as target:
@@ -264,7 +264,6 @@ class UpdateManager:
 _APPLY_HELPER = r'''from __future__ import annotations
 
 import ctypes
-import fnmatch
 import os
 import shutil
 import sys
