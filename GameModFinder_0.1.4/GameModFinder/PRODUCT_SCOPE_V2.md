@@ -14,7 +14,7 @@ Help users discover Pawchive creators, follow them, browse their posts, and down
 Use the stable pair `(service, creator_id)`. URL intake extracts both values. Manual ID intake requires selecting the Pawchive service. Verify the profile before saving and prevent duplicates.
 
 ## Content model
-Keep creators, posts, media/attachments, follows, sync checkpoints, and download records separate. A Pawchive post is not automatically a game mod. Do not add creator quality scoring or automatic mod classification in v1.
+Keep creators, posts, media/attachments, follows, sync checkpoints, and download records separate. A Pawchive post is not automatically a game mod. Character-name searches may drive an opt-in, bounded archive inspection workflow: creators of posts whose archives contain `.ini` entries are listed as evidence-backed candidates. This is a discovery heuristic, not a definitive classification, reputation score, or creator ranking.
 
 ## Sync
 - Default interval: 60 minutes.
@@ -45,7 +45,7 @@ The public API base documented by the Pawchive client ecosystem is `https://pawc
 
 ## Out of scope
 - Multi-platform aggregation
-- Creator ranking/reputation scoring
+- Creator ranking/reputation scoring or automatic confirmation of mod creators
 - Automatic mod-vs-non-mod classification
 - Mod installation management after extraction
 - Enabling/disabling, updating, or uninstalling mods
