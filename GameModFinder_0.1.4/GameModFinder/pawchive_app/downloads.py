@@ -752,7 +752,7 @@ def download_mega_file(
 
         key_bytes = a32_to_str(decrypt_key)
         iv_bytes = a32_to_str((iv_words[0], iv_words[1], iv_words[0], iv_words[1]))
-        counter_value = ((iv_words[0] << 32) + iv_words[1]) << 64
+        counter_value = (iv_words[0] << 32) + (iv_words[1] << 64)
         counter = Counter.new(128, initial_value=counter_value)
         stream_cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
         running_mac = b"\x00" * 16
