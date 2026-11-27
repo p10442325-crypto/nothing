@@ -291,12 +291,12 @@ class LocalRepository:
             rows = db.execute(
                 """
                 SELECT
-                    e.service, e.creator_id, COALESCE(c.name, '') AS creator_name,
+                    e.service, e.creator_id, e.game_key, e.game_name, COALESCE(c.name, '') AS creator_name,
                     COUNT(*) AS evidence_count,
                     MAX(e.scanned_at) AS last_scanned,
                     (
                         SELECT x.post_id FROM mod_creator_evidence x
-                        WHERE x.service=e.service AND x.creator_id=e.creator_id
+                        WHERE x.service=e.service AND x.creator_id=e.creator_id AND x.game_key=e.game_key
                         ORDER BY x.scanned_at DESC LIMIT 1
                     ) AS latest_post_id,
                     (
@@ -323,7 +323,7 @@ class LocalRepository:
                 LEFT JOIN creators c
                     ON c.service=e.service AND c.creator_id=e.creator_id
                 WHERE (? IS NULL OR e.game_key=?)
-                GROUP BY e.service, e.creator_id
+                GROUP BY e.service, e.creator_id, e.game_key, e.game_name
                 ORDER BY evidence_count DESC, last_scanned DESC, e.service, e.creator_id
                 """, (game_key, game_key)
             ).fetchall()
