@@ -634,6 +634,30 @@ def download_file(
 
 
 
+MEGA_CDN_DOMAINS = ("mega.nz", "mega.co.nz", "mega.io")
+
+
+def _is_trusted_mega_download_url(url: str) -> bool:
+    """Accept only HTTPS download URLs served from MEGA-owned domains.
+
+    MEGA's storage servers now use ``*.userstorage.mega.io`` in addition to the
+    older ``*.userstorage.mega.co.nz`` / ``*.mega.nz`` hosts.
+    """
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return False
+    return any(host == domain or host.endswith("." + domain) for domain in MEGA_CDN_DOMAINS)
+
+
 def download_mega_file(
     url: str,
     destination_dir: str | Path,
@@ -713,19 +737,7 @@ def download_mega_file(
             raise DownloadError("MEGA에서 공개 파일 정보를 받지 못했습니다.")
 
         file_url = str(file_data["g"])
-        cdn = urlsplit(file_url)
-        cdn_host = (cdn.hostname or "").lower()
-        if (
-            cdn.scheme.lower() != "https"
-            or not cdn_host
-            or cdn.username is not None
-            or cdn.password is not None
-            or not (
-                cdn_host in {"mega.nz", "mega.co.nz"}
-                or cdn_host.endswith(".mega.nz")
-                or cdn_host.endswith(".mega.co.nz")
-            )
-        ):
+        if not _is_trusted_mega_download_url(file_url):
             raise DownloadError("MEGA가 안전하지 않은 다운로드 서버 주소를 반환했습니다.")
 
         try:
