@@ -1656,7 +1656,7 @@ class MainWindow(QMainWindow):
         if is_mega_link:
             parsed = QUrl(attachment.path)
             allowed_hosts = {
-                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io",
             }
             if parsed.scheme() != "https" or parsed.host().lower() not in allowed_hosts:
                 QMessageBox.warning(
