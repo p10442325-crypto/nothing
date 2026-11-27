@@ -120,6 +120,44 @@ class ApiTests(unittest.TestCase):
         mock_browser.assert_called_once()
 
     @patch("pawchive_app.api.urlopen")
+    def test_post_detail_unwraps_nested_data_post(self):
+        client = PawchiveClient()
+        detail = {
+            "id": "88", "service": "fanbox", "user": "1234",
+            "file": {"name": "release.rar", "path": "/data/ab/release"},
+            "attachments": [],
+        }
+        with patch.object(client, "_get_json", return_value={"data": {"post": detail}}):
+            result = client.post_detail("fanbox", "1234", "88")
+        self.assertEqual(result["file"]["name"], "release.rar")
+
+    def test_complete_post_metadata_fetches_missing_attachment_fields(self):
+        partial = Post.from_api({
+            "id": "rar-post", "service": "fanbox", "user": "creator-1",
+            "title": "RAR attachment post",
+        })
+        detail = {
+            "id": "rar-post",
+            "file": {"name": "character-pack.rar", "path": "/data/ab/character-pack"},
+            "attachments": [],
+        }
+        with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
+            completed = PawchiveClient().complete_post_metadata([partial])
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].files[0].name, "character-pack.rar")
+        fetch.assert_called_once_with("fanbox", "creator-1", "rar-post")
+
+    def test_complete_post_metadata_keeps_post_when_detail_fails(self):
+        partial = Post.from_api({
+            "id": "no-detail", "service": "fanbox", "user": "creator-1",
+            "title": "Still show the post",
+        })
+        with patch.object(PawchiveClient, "post_detail", side_effect=RuntimeError("temporary")):
+            client = PawchiveClient()
+            completed = client.complete_post_metadata([partial])
+        self.assertEqual(completed, [partial])
+        self.assertEqual(client.last_detail_failures, 1)
+
     def test_creator_post_route_and_offset(self, mock_urlopen):
         mock_urlopen.return_value = FakeResponse(json.dumps([
             {"id": "88", "service": "fanbox", "user": "1234", "title": "One"}
