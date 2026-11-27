@@ -213,6 +213,16 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(len(repo.posts_for_creator("fanbox", "1234")), 175)
             self.assertEqual(len(repo.following_feed(limit=25)), 25)
 
+    def test_mod_creator_evidence_is_scoped_to_selected_game(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalRepository(Path(tmp) / "data.sqlite3")
+            genshin = Post(service="fanbox", creator_id="alice", post_id="1", title="Raiden")
+            starrail = Post(service="fanbox", creator_id="alice", post_id="2", title="Kafka")
+            repo.save_mod_creator_evidence(genshin, "raiden.zip", ["Raiden.ini"], game_key="genshin", game_name="원신")
+            repo.save_mod_creator_evidence(starrail, "kafka.zip", ["Kafka.ini"], game_key="starrail", game_name="붕괴: 스타레일")
+            self.assertEqual(len(repo.mod_creator_candidates(game_key="genshin")), 1)
+            self.assertEqual(repo.mod_creator_evidence_for_creator("fanbox", "alice")[0]["game_key"], "starrail")
+            self.assertEqual(len(repo.mod_creator_candidates()), 1)
     def test_follow_unknown_creator_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = LocalRepository(Path(tmp) / "data.sqlite3")
