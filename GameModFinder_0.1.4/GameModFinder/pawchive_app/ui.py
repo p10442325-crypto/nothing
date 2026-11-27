@@ -1476,6 +1476,8 @@ class MainWindow(QMainWindow):
                     session_cookie=self.settings.get("session_key") or None,
                     temporary_root=data_dir(),
                     progress=report,
+                    game_key=str(game_key),
+                    game_name=self.mod_scan_game_combo.currentText(),
                 )
 
         def done(result) -> None:
@@ -1514,7 +1516,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "mod_candidate_list"):
             return
         selected = self.mod_candidate_list.currentRow()
-        self._mod_candidate_rows = self.database.mod_creator_candidates()
+        selected_game = self.mod_scan_game_combo.currentData() if hasattr(self, "mod_scan_game_combo") else None
+        self._mod_candidate_rows = self.database.mod_creator_candidates(
+            game_key=selected_game if selected_game and selected_game != "__custom__" else None
+        )
         self.mod_candidate_list.blockSignals(True)
         self.mod_candidate_list.clear()
         for row in self._mod_candidate_rows:
