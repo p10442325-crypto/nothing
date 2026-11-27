@@ -649,18 +649,33 @@ def download_mega_file(
     """
     parsed = urlsplit((url or "").strip())
     host = (parsed.hostname or "").lower()
-    allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
-    match = re.fullmatch(r"/file/([A-Za-z0-9_-]{8})/?", parsed.path or "")
+    allowed_hosts = {
+        "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+        "mega.io", "www.mega.io",
+    }
+    match = re.fullmatch(r"/(?:file|embed)/([A-Za-z0-9_-]{8})/?", parsed.path or "")
     file_key_text = unquote(parsed.fragment or "")
+    legacy_match = (
+        re.fullmatch(r"!([A-Za-z0-9_-]{8})!([A-Za-z0-9_-]{43,44})", file_key_text)
+        if host in {"mega.co.nz", "www.mega.co.nz"} and parsed.path in {"", "/"}
+        else None
+    )
     if (
         parsed.scheme.lower() != "https"
         or host not in allowed_hosts
         or parsed.username is not None
         or parsed.password is not None
-        or not match
-        or not re.fullmatch(r"[A-Za-z0-9_-]{43,44}", file_key_text)
     ):
         raise DownloadError("올바른 MEGA 공개 파일 링크가 아닙니다.")
+    if legacy_match:
+        file_handle = legacy_match.group(1)
+        file_key_text = legacy_match.group(2)
+    elif match:
+        file_handle = match.group(1)
+    else:
+        raise DownloadError("올바른 MEGA 공개 파일 링크가 아닙니다.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43,44}", file_key_text):
+        raise DownloadError("MEGA 링크의 복호화 키 길이가 올바르지 않습니다.")
 
     try:
         from mega import Mega
@@ -683,7 +698,6 @@ def download_mega_file(
     client = Mega()
     temporary: Path | None = None
     try:
-        file_handle = match.group(1)
         try:
             key_words = base64_to_a32(file_key_text)
         except Exception as exc:
