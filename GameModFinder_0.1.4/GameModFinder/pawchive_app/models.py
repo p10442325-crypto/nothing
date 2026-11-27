@@ -378,7 +378,7 @@ class Post:
             # Keep them as link cards so users can open them in a browser;
             # never feed the encrypted URL to the direct-file downloader.
             if host in {
-                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io",
             }:
                 add_mega_link(clean_href, label_text)
                 continue
@@ -407,7 +407,7 @@ class Post:
         # instead of <a href="..."> anchors. Recognize the MEGA file URL form
         # and route it through the same external-link card.
         mega_url_pattern = re.compile(
-            r"https://(?:www\.)?mega(?:\.nz|\.co\.nz)/(?:file/[^\s\"'<>]+|#![^\s\"'<>]+)",
+            r"""https://(?:www\.)?mega(?:\.nz|\.co\.nz|\.io)/(?:file/[^\s"'<>]+|embed/[^\s"'<>]+|#![^\s"'<>]+)""",
             flags=re.I,
         )
         for match in mega_url_pattern.findall(_string(value.get("content"))):
