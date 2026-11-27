@@ -767,8 +767,9 @@ class MainWindow(QMainWindow):
         self._load_creators()
         self._load_following_local()
         self._refresh_mod_candidates()
-        if self.database.followed_creators():
-            QTimer.singleShot(1800, self.refresh_following)
+        # Do not launch a full roster sync shortly after startup. It can keep
+        # every manual action locked while thousands of posts are paged in.
+        # The configured interval timer performs the first automatic sync.
 
     def _build_ui(self) -> None:
         central = QWidget(); self.setCentralWidget(central)
