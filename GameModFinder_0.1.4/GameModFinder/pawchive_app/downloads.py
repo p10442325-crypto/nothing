@@ -16,7 +16,7 @@ from concurrent.futures import Future
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from typing import Callable
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from .api import APP_USER_AGENT
 
@@ -637,25 +637,37 @@ def download_file(
 MEGA_CDN_DOMAINS = ("mega.nz", "mega.co.nz", "mega.io")
 
 
+def _is_mega_owned_host(host: str) -> bool:
+    """Check a hostname against MEGA's domains without accepting lookalikes."""
+    normalized = (host or "").lower().rstrip(".")
+    return bool(normalized) and any(
+        normalized == domain or normalized.endswith("." + domain)
+        for domain in MEGA_CDN_DOMAINS
+    )
+
+
 def _is_trusted_mega_download_url(url: str) -> bool:
     """Accept only HTTPS download URLs served from MEGA-owned domains.
 
-    MEGA's storage servers now use ``*.userstorage.mega.io`` in addition to the
-    older ``*.userstorage.mega.co.nz`` / ``*.mega.nz`` hosts.
+    MEGA may return HTTP storage URLs for its already-encrypted transfer
+    chunks. Those are upgraded to HTTPS by _normalize_mega_download_url()
+    before this validator is called.
     """
     try:
         parsed = urlsplit(url)
         host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
     except ValueError:
         return False
     if (
         parsed.scheme.lower() != "https"
-        or not host
+        or not _is_mega_owned_host(host)
         or parsed.username is not None
         or parsed.password is not None
+        or port not in (None, 443)
     ):
         return False
-    return any(host == domain or host.endswith("." + domain) for domain in MEGA_CDN_DOMAINS)
+    return True
 
 
 def _single_mega_download_url(value: object) -> str:
@@ -677,6 +689,41 @@ def _single_mega_download_url(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DownloadError("MEGA에서 다운로드 서버 주소를 받지 못했습니다.")
     return value.strip()
+
+
+def _normalize_mega_download_url(value: object) -> str:
+    """Normalize MEGA's API URL and upgrade trusted HTTP storage hosts to HTTPS.
+
+    MEGA's API can return URLs such as
+    ``http://gfsNNN.userstorage.mega.co.nz/...``. The hostname is validated
+    before changing the scheme, so an arbitrary HTTP URL can never be upgraded
+    and accepted. Only default HTTP/HTTPS ports are allowed; the actual transfer
+    always uses HTTPS with the HTTP client's normal certificate verification.
+    """
+    raw_url = _single_mega_download_url(value)
+    try:
+        parsed = urlsplit(raw_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError as exc:
+        raise DownloadError("MEGA 다운로드 서버 주소 형식이 올바르지 않습니다.") from exc
+
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not _is_mega_owned_host(host)
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 80, 443)
+    ):
+        identity = _mega_download_server_identity(raw_url)
+        raise DownloadError(
+            "MEGA가 허용되지 않은 다운로드 서버를 반환했습니다 "
+            f"({identity}). MEGA HTTPS 도메인만 사용할 수 있습니다."
+        )
+
+    # Strip :80 when upgrading; preserve an explicit default HTTPS port.
+    netloc = host if port in (None, 80) else f"{host}:443"
+    return urlunsplit(("https", netloc, parsed.path or "/", parsed.query, ""))
 
 
 def _mega_download_server_identity(url: str) -> str:
@@ -768,7 +815,7 @@ def download_mega_file(
         ):
             raise DownloadError("MEGA에서 공개 파일 정보를 받지 못했습니다.")
 
-        file_url = _single_mega_download_url(file_data["g"])
+        file_url = _normalize_mega_download_url(file_data["g"])
         if not _is_trusted_mega_download_url(file_url):
             # Keep this diagnostic deliberately limited to scheme + hostname;
             # MEGA's temporary URL path/query must never be copied into logs or UI.
