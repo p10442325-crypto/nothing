@@ -21,7 +21,7 @@ def is_mega_file_url(value: str) -> bool:
     parsed = urlparse(_string(value).strip())
     host = (parsed.hostname or "").lower()
     allowed_hosts = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io"}
-    modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None
+    modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8,64}/?", parsed.path or "") is not None
     legacy_file = (
         host in {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
         and parsed.path in {"", "/"}
@@ -348,7 +348,7 @@ class Post:
             mega_host = host in {
                 "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz", "mega.io", "www.mega.io",
             }
-            modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8}/?", parsed.path or "") is not None and bool(parsed.fragment)
+            modern_file = re.fullmatch(r"/(?:file|embed)/[A-Za-z0-9_-]{8,64}/?", parsed.path or "") is not None and bool(parsed.fragment)
             legacy_file = (
                 host in {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
                 and parsed.path in {"", "/"}
