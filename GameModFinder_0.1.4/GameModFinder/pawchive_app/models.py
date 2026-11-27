@@ -199,12 +199,52 @@ class Post:
             r"""<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""",
             flags=re.I | re.S,
         )
+        def add_mega_link(raw_url: str, label_text: str = "") -> None:
+            clean_url = html.unescape(raw_url).strip().rstrip(".,);]")
+            parsed = urlparse(clean_url)
+            host = (parsed.hostname or "").lower()
+            mega_host = host in {
+                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+            }
+            modern_file = parsed.path.startswith("/file/") and bool(parsed.fragment)
+            legacy_file = (
+                host.endswith("mega.co.nz")
+                and parsed.path in {"", "/"}
+                and parsed.fragment.startswith("!")
+            )
+            if parsed.scheme != "https" or not mega_host or not (modern_file or legacy_file):
+                return
+            label = " ".join(label_text.split())
+            if not label or label.casefold() in {
+                "download", "download here", "click here", "link",
+                "mega", "다운로드", "여기", "링크",
+            }:
+                label = "MEGA 외부 파일 링크"
+            attachment = Attachment.from_api(
+                {"name": label, "path": clean_url}, "external_link"
+            )
+            if attachment and not any(
+                entry.kind == "external_link" and entry.path == attachment.path
+                for entry in found
+            ):
+                found.append(attachment)
+
         for href, label in anchor_pattern.findall(_string(value.get("content"))):
             clean_href = html.unescape(href).strip()
             label_text = re.sub(r"<[^>]*>", " ", label)
             label_text = " ".join(html.unescape(label_text).split())
             parsed_href = urlparse(clean_href)
             host = (parsed_href.hostname or "").lower()
+
+            # MEGA links are external downloads, not Pawchive file paths.
+            # Keep them as link cards so users can open them in a browser;
+            # never feed the encrypted URL to the direct-file downloader.
+            if host in {
+                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+            }:
+                add_mega_link(clean_href, label_text)
+                continue
+
             safe_host = host in {"pawchive.pw", "www.pawchive.pw", "file.pawchive.pw"}
             safe_path = (
                 not parsed_href.scheme
@@ -224,6 +264,16 @@ class Post:
             )
             if attachment and attachment.path not in {entry.path for entry in found}:
                 found.append(attachment)
+
+        # Pawchive content may expose external download URLs as plain text
+        # instead of <a href="..."> anchors. Recognize the MEGA file URL form
+        # and route it through the same external-link card.
+        mega_url_pattern = re.compile(
+            r"https://(?:www\.)?mega(?:\.nz|\.co\.nz)/(?:file/[^\s\"'<>]+|#![^\s\"'<>]+)",
+            flags=re.I,
+        )
+        for match in mega_url_pattern.findall(_string(value.get("content"))):
+            add_mega_link(match)
 
         return cls(
             service=service,
