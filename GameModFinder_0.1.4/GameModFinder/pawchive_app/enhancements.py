@@ -10,8 +10,8 @@ from PySide6.QtCore import QUrl, QThread, Signal
 from PySide6.QtGui import QImage, QTextDocument
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QTextBrowser
 
-from .downloads import fetch_thumbnail_bytes
-from .models import Attachment, Post
+from .downloads import FILES_HOST, fetch_thumbnail_bytes
+from .models import Attachment, Post, is_mega_file_url
 
 
 IMAGE_EXTENSIONS = {
@@ -412,7 +412,33 @@ class PostTextBrowser(QTextBrowser):
         self.setToolTip(message)
 
 
+def _uses_original_download_flow(attachment: Attachment) -> bool:
+    """True when the attachment is not a plain Pawchive file-server download.
+
+    MEGA/external links, deferred attachments (real link only known after the
+    post detail lookup) and attachments with no path must go through the
+    original ``MainWindow.download_attachment`` in ui.py, which knows how to
+    route MEGA links to ``download_mega_file`` and how to fall back to the
+    post page's Downloads section. Sending them to ``download_file`` raises
+    "Pawchive 파일 서버 주소가 아닙니다.".
+    """
+    path = (attachment.path or "").strip()
+    if attachment.kind == "external_link" or is_mega_file_url(path):
+        return True
+    if getattr(attachment, "deferred", False) or not path:
+        return True
+    parsed = urlsplit(path)
+    if parsed.scheme and (parsed.hostname or "").lower() != FILES_HOST:
+        return True
+    return False
+
+
 def _enhanced_download_attachment(self, post: Post, attachment: Attachment) -> None:
+    original = getattr(self, "_pawchive_original_download_attachment", None)
+    if original is not None and _uses_original_download_flow(attachment):
+        original(post, attachment)
+        return
+
     paths = {"공통 저장 폴더": self.settings.get("download_dir", "")}
     for name, folder in self.settings.get("game_paths", {}).items():
         paths[f"{name} 저장 폴더"] = folder
@@ -519,5 +545,8 @@ def install_ui_enhancements(ui_module) -> None:
                 self.content.setHtml(render_post_html(post.content, post.files))
 
     ui_module.PostBrowser = RichPostBrowser
+    ui_module.MainWindow._pawchive_original_download_attachment = (
+        ui_module.MainWindow.download_attachment
+    )
     ui_module.MainWindow.download_attachment = _enhanced_download_attachment
     ui_module._pawchive_enhancements_installed = True
