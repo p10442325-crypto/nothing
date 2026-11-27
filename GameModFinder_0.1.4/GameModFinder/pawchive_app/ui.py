@@ -1314,6 +1314,9 @@ class MainWindow(QMainWindow):
         ):
             if browser is not None:
                 active.extend(getattr(browser, "_thumbnail_workers", set()))
+                content = getattr(browser, "content", None)
+                if content is not None:
+                    active.extend(getattr(content, "_pending", {}).values())
         return any(worker.isRunning() for worker in active)
 
     def check_for_updates(self) -> None:
