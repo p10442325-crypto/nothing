@@ -1039,11 +1039,134 @@ def safe_extract_tar(archive_path: str | Path, destination: str | Path) -> list[
         return extracted
 
 
+def safe_extract_7z(archive_path: str | Path, destination: str | Path) -> list[Path]:
+    """Safely extract a 7Z archive after validating every member and rejecting links."""
+    archive, root = Path(archive_path), Path(destination).resolve()
+    try:
+        import py7zr
+    except ImportError as exc:
+        raise DownloadError(
+            "7Z 압축 해제를 위한 py7zr 패키지가 없습니다. run.bat을 다시 실행해 주세요."
+        ) from exc
+
+    root_existed = root.exists()
+    if root_existed and any(root.iterdir()):
+        raise FileExistsError(f"압축 해제 대상 폴더가 비어 있지 않습니다: {root}")
+
+    try:
+        with py7zr.SevenZipFile(archive, mode="r") as seven:
+            planned: list[tuple[str, Path, bool]] = []
+            for member in seven.list():
+                name = str(member.filename)
+                is_directory = bool(member.is_directory)
+                is_file = bool(member.is_file)
+                is_symlink = bool(member.is_symlink)
+                if is_symlink or not (is_directory or is_file):
+                    raise DownloadError(f"7Z 링크 또는 특수 파일은 추출하지 않습니다: {name}")
+                target = _safe_target(root, name)
+                if target.exists():
+                    raise FileExistsError(f"압축 해제 대상이 이미 존재합니다: {target}")
+                planned.append((name, target, is_file))
+
+            root.mkdir(parents=True, exist_ok=True)
+            seven.extractall(path=root)
+            return [target for _name, target, is_file in planned if is_file]
+    except DownloadError:
+        if not root_existed:
+            shutil.rmtree(root, ignore_errors=True)
+        raise
+    except Exception as exc:
+        if not root_existed:
+            shutil.rmtree(root, ignore_errors=True)
+        raise DownloadError(f"7Z 압축 해제에 실패했습니다: {exc}") from exc
+
+
+def safe_extract_rar(archive_path: str | Path, destination: str | Path) -> list[Path]:
+    """Safely extract a RAR archive member-by-member, rejecting links and special files."""
+    archive, root = Path(archive_path), Path(destination).resolve()
+    try:
+        import rarfile
+    except ImportError as exc:
+        raise DownloadError(
+            "RAR 압축 해제를 위한 rarfile 패키지가 없습니다. run.bat을 다시 실행해 주세요."
+        ) from exc
+
+    root_existed = root.exists()
+    if root_existed and any(root.iterdir()):
+        raise FileExistsError(f"압축 해제 대상 폴더가 비어 있지 않습니다: {root}")
+
+    try:
+        with rarfile.RarFile(archive) as rar:
+            planned: list[tuple[object, Path, bool]] = []
+            for member in rar.infolist():
+                name = str(member.filename)
+                is_directory = bool(member.is_dir() if hasattr(member, "is_dir") else member.isdir())
+                is_symlink_attr = getattr(member, "is_symlink", None)
+                is_symlink = bool(is_symlink_attr() if callable(is_symlink_attr) else False)
+                is_file_attr = getattr(member, "is_file", None)
+                is_file = bool(is_file_attr() if callable(is_file_attr) else not is_directory)
+                if is_symlink or not (is_directory or is_file):
+                    raise DownloadError(f"RAR 링크 또는 특수 파일은 추출하지 않습니다: {name}")
+                target = _safe_target(root, name)
+                if target.exists():
+                    raise FileExistsError(f"압축 해제 대상이 이미 존재합니다: {target}")
+                planned.append((member, target, is_file))
+
+            root.mkdir(parents=True, exist_ok=True)
+            extracted: list[Path] = []
+            for member, target, is_file in planned:
+                if not is_file:
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with rar.open(member.filename) as source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                extracted.append(target)
+            return extracted
+    except DownloadError:
+        if not root_existed:
+            shutil.rmtree(root, ignore_errors=True)
+        raise
+    except Exception as exc:
+        if not root_existed:
+            shutil.rmtree(root, ignore_errors=True)
+        raise DownloadError(
+            f"RAR 압축 해제에 실패했습니다. RAR5는 unrar 또는 bsdtar가 필요할 수 있습니다: {exc}"
+        ) from exc
+
+
 def safe_extract_archive(archive_path: str | Path, destination: str | Path) -> list[Path]:
-    """Safely extract ZIP or TAR-family archives; unsupported formats are left intact."""
+    """Safely extract ZIP, 7Z, RAR, and TAR-family archives; leave other files untouched."""
     archive = Path(archive_path)
     if zipfile.is_zipfile(archive):
         return safe_extract_zip(archive, destination)
     if tarfile.is_tarfile(archive):
         return safe_extract_tar(archive, destination)
+
+    suffix = archive.suffix.casefold()
+    if suffix == ".7z":
+        return safe_extract_7z(archive, destination)
+    if suffix == ".rar":
+        return safe_extract_rar(archive, destination)
     return []
+
+
+def extract_archive_and_remove(archive_path: str | Path) -> tuple[Path | None, list[Path]]:
+    """Extract a downloaded archive and remove its original only after successful extraction.
+
+    Returns the extraction directory and extracted files. If the input is not a
+    supported archive, returns (None, []) and leaves the input unchanged.
+    """
+    archive = Path(archive_path)
+    destination = archive.with_name(archive.stem + "_extracted")
+    extracted = safe_extract_archive(archive, destination)
+    if not extracted:
+        return None, []
+
+    try:
+        archive.unlink()
+    except OSError as exc:
+        raise DownloadError(
+            f"압축 해제는 완료했지만 원본 압축파일을 삭제하지 못했습니다: {archive.name}"
+        ) from exc
+    return destination, extracted
