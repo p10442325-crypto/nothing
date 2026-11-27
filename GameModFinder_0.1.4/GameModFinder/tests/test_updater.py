@@ -9,6 +9,7 @@ from unittest.mock import patch
 from pawchive_app.updater import (
     BASELINE_COMMIT,
     UpdateManager,
+    _APPLY_HELPER,
 )
 
 
@@ -96,6 +97,9 @@ class UpdateManagerTests(unittest.TestCase):
         with patch.object(self.manager, "_request_bytes", return_value=buffer.getvalue()):
             with self.assertRaisesRegex(RuntimeError, "GameModFinder 폴더"):
                 self.manager.prepare(LATEST)
+
+    def test_windows_update_helper_is_valid_python(self):
+        compile(_APPLY_HELPER, "apply_update.py", "exec")
 
 
 if __name__ == "__main__":
