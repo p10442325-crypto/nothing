@@ -935,7 +935,7 @@ class MainWindow(QMainWindow):
         self.mod_scan_pages = QSpinBox()
         self.mod_scan_pages.setRange(1, 20)
         self.mod_scan_pages.setValue(5)
-        self.mod_scan_pages.setSuffix("페이지 (최대 1,000 게시물)")
+        self.mod_scan_pages.setSuffix("페이지/검색어")
         scan_options.addWidget(self.mod_scan_pages)
         scan_options.addStretch()
         scan_panel_layout.addLayout(scan_options)
@@ -945,7 +945,7 @@ class MainWindow(QMainWindow):
         self.mod_scan_button.setObjectName("Primary")
         self.mod_scan_button.clicked.connect(self.scan_mod_creator_candidates)
         scan_actions.addWidget(self.mod_scan_button)
-        self.mod_scan_status = QLabel("검색어당 기본 5페이지까지 확인합니다. 발견된 INI 근거는 이 PC에 저장됩니다.")
+        self.mod_scan_status = QLabel("기본 5페이지, 검색어당 최대 20페이지까지 확인합니다. INI 발견 근거는 이 PC에 저장됩니다.")
         self.mod_scan_status.setWordWrap(True)
         self.mod_scan_status.setObjectName("Subtle")
         scan_actions.addWidget(self.mod_scan_status, 1)
@@ -1486,7 +1486,7 @@ class MainWindow(QMainWindow):
         for row in self._mod_candidate_rows:
             label = (
                 f"{row['service']}:{row['creator_id']}  ·  "
-                f"근거 게시물 {row['evidence_count']}개"
+                f"INI 확인 압축파일 {row['evidence_count']}개"
             )
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, row)
@@ -1497,7 +1497,7 @@ class MainWindow(QMainWindow):
             self._mod_candidate_selected(self.mod_candidate_list.currentRow())
         else:
             self._selected_mod_candidate = None
-            self.mod_candidate_detail.setText("아직 INI 파일이 확인된 제작자 후보가 없습니다.")
+            self.mod_candidate_detail.setText("아직 자동 탐색으로 확인된 제작자 후보가 없습니다.")
             for button in (
                 self.open_candidate_post_button,
                 self.open_candidate_creator_button,
