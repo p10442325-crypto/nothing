@@ -608,6 +608,7 @@ class PostBrowser(QWidget):
             row.addWidget(button)
             grid_row, grid_col = divmod(index, 2)
             self.attachments_grid.addWidget(card, grid_row, grid_col)
+            self.analysis_buttons.append(analyze_button)
             self.attachment_buttons.append(button)
 
     def _back_to_list(self) -> None:
@@ -1424,6 +1425,7 @@ class MainWindow(QMainWindow):
         self.mod_candidate_list.blockSignals(False)
         if self._mod_candidate_rows:
             self.mod_candidate_list.setCurrentRow(min(max(0, selected), len(self._mod_candidate_rows) - 1))
+            self._mod_candidate_selected(self.mod_candidate_list.currentRow())
         else:
             self._selected_mod_candidate = None
             self.mod_candidate_detail.setText("아직 INI 파일이 확인된 제작자 후보가 없습니다.")
