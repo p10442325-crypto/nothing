@@ -177,6 +177,15 @@ class ModelTests(unittest.TestCase):
         url = "https://mega.io/embed/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
         self.assertTrue(is_mega_file_url(url))
 
+    def test_legacy_mega_share_url_with_fragment_is_recognized(self):
+        from pawchive_app.models import is_mega_file_url
+        url = "https://mega.nz/#!BzcjlbzZ!uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        self.assertTrue(is_mega_file_url(url))
+        links = extract_mega_links_from_post_html(
+            '<h2>Downloads</h2><a href="' + url + '">Archive</a>',
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "Archive")])
     def test_extract_mega_io_embed_link_from_post_html(self):
         url = "https://mega.io/embed/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
         links = extract_mega_links_from_post_html(
