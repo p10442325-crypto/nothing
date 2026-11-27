@@ -18,7 +18,7 @@ from pawchive_app.api import PawchiveClient
 from pawchive_app.archive_analysis import ArchiveInspectionError, analyze_archive_for_ini
 from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
 from pawchive_app.enhancements import pawchive_image_url
-from pawchive_app.models import Creator, Post, parse_creator_url, post_matches_search_fields
+from pawchive_app.models import (Creator, Post, extract_mega_links_from_post_html, parse_creator_url, post_matches_search_fields)
 from pawchive_app.repository import LocalRepository
 from pawchive_app.updater import BASELINE_COMMIT, UpdateManager, _APPLY_HELPER
 
@@ -172,6 +172,28 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(post.files[0].path, url)
         self.assertEqual(post.files[0].name, "MEGA 외부 파일 링크")
 
+    def test_post_extracts_mega_link_from_rendered_downloads_section(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        page_html = (
+            "<html><body>"
+            "<h2>Downloads</h2><div><a href='" + url + "'>Download character-pack.rar</a></div>"
+            "<h2>Comments</h2><a href='https://mega.nz/file/Another12#ignored'>Ignore</a>"
+            "</body></html>"
+        )
+        links = extract_mega_links_from_post_html(
+            page_html,
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "Download character-pack.rar")])
+
+    def test_post_extracts_mega_link_from_html_when_download_heading_is_missing(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        links = extract_mega_links_from_post_html(
+            f'<a href="{url}">Archive</a>',
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "")])
+
     def test_post_parses_plain_text_mega_file_link(self):
         url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
         post = Post.from_api({
@@ -246,6 +268,35 @@ class ApiTests(unittest.TestCase):
         with patch.object(client, "_get_json", return_value={"data": {"post": detail}}):
             result = client.post_detail("fanbox", "1234", "88")
         self.assertEqual(result["file"]["name"], "release.rar")
+
+    @patch("pawchive_app.api.urlopen")
+    def test_post_page_html_fetches_rendered_page_for_reported_post(self, mock_urlopen):
+        page_html = "<html><body><h2>Downloads</h2></body></html>"
+        mock_urlopen.return_value = FakeResponse(page_html.encode())
+        client = PawchiveClient()
+        result = client.post_page_html("patreon", "124138802", "172109941")
+        self.assertEqual(result, page_html)
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertIn("text/html", request.get_header("Accept"))
+
+    def test_deferred_detail_mega_url_is_normalized_for_download_routing(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        summary = Post.from_api({
+            "id": "172109941", "service": "patreon", "user": "124138802",
+            "attachments": [{"name": "character-pack.rar", "deferred": True}],
+        })
+        detail = {
+            "id": "172109941", "service": "patreon", "user": "124138802",
+            "attachments": [{"name": "character-pack.rar", "temp_url": url}],
+        }
+        refreshed = Post.from_api({**summary.raw, **detail})
+        self.assertEqual(summary.files[0].path, "")
+        self.assertEqual(refreshed.files[0].path, url)
+        self.assertEqual(refreshed.files[0].kind, "external_link")
 
     def test_complete_post_metadata_expands_partial_patreon_post(self):
         # Regression fixture follows the URL supplied for this report:
