@@ -670,6 +670,19 @@ def _is_trusted_mega_download_url(url: str) -> bool:
     return True
 
 
+def _mega_ctr_initial_value(iv_words: tuple[int, int]) -> int:
+    """Build MEGA's 128-bit CTR initial counter from its two-word IV."""
+    if len(iv_words) != 2:
+        raise DownloadError("MEGA CTR 초기화 벡터 길이가 올바르지 않습니다.")
+    return int.from_bytes(
+        # MEGA stores the two IV words in the high 64 bits; low 64 bits are zero.
+        # a32_to_str is imported locally by the download function, so use a
+        # straightforward big-endian word encoding here.
+        b"".join(int(word).to_bytes(4, "big") for word in (*iv_words, 0, 0)),
+        "big",
+    )
+
+
 def _single_mega_download_url(value: object) -> str:
     """Normalize MEGA's one-URL response, including the API's singleton-array form.
 
@@ -869,9 +882,7 @@ def download_mega_file(
         # mega.py-v2: ((iv0 << 32) + iv1) << 64. The previous expression
         # placed the IV words in the wrong byte positions and produced files
         # that decrypted to garbage, which then failed the file-MAC check.
-        counter_value = int.from_bytes(
-            a32_to_str((iv_words[0], iv_words[1], 0, 0)), "big"
-        )
+        counter_value = _mega_ctr_initial_value((iv_words[0], iv_words[1]))
         counter = Counter.new(128, initial_value=counter_value)
         stream_cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
         running_mac = b"\x00" * 16
