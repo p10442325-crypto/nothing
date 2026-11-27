@@ -27,6 +27,8 @@ jobs:
         run: python -m compileall -q pawchive_app main_v2.py
       - name: Run Pawchive core tests
         run: python -m unittest discover -s tests -p "test_pawchive_app.py" -v
+      - name: Run automated creator discovery tests
+        run: python -m unittest discover -s tests -p "test_creator_discovery.py" -v
       - name: Smoke test desktop interface
         env:
           QT_QPA_PLATFORM: offscreen
