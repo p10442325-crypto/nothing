@@ -52,6 +52,17 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(post.key, "fanbox:1234:88")
         self.assertEqual([item.name for item in post.files], ["main.zip", "preview.png"])
 
+    def test_post_keeps_multiple_distinct_pathless_attachments(self):
+        post = Post.from_api({
+            "id": "pathless-pair", "service": "patreon", "user": "124138802",
+            "file": {"name": "preview.jpg"},
+            "attachments": [{"name": "character-pack.rar", "deferred": True}],
+        })
+        self.assertEqual(
+            [item.name for item in post.files],
+            ["preview.jpg", "character-pack.rar"],
+        )
+
     def test_post_preserves_pathless_deferred_rar_reference(self):
         post = Post.from_api({
             "id": "deferred-rar", "service": "fanbox", "user": "1234",
@@ -183,6 +194,33 @@ class ApiTests(unittest.TestCase):
         with patch.object(client, "_get_json", return_value={"data": {"post": detail}}):
             result = client.post_detail("fanbox", "1234", "88")
         self.assertEqual(result["file"]["name"], "release.rar")
+
+    def test_complete_post_metadata_expands_partial_patreon_post(self):
+        # Regression fixture follows the URL supplied for this report:
+        # /patreon/user/124138802/post/101845109.
+        summary = Post.from_api({
+            "id": "101845109", "service": "patreon", "user": "124138802",
+            "title": "Partial list record",
+            "has_full": False,
+            "file": None,
+            "attachments": [],
+        })
+        detail = {
+            "id": "101845109", "service": "patreon", "user": "124138802",
+            "file": None,
+            "attachments": [{
+                "name": "character-pack.rar",
+                "temp_url": "https://file.pawchive.pw/data/ab/temp",
+                "deferred": True,
+            }],
+        }
+        with patch.object(PawchiveClient, "post_detail", return_value=detail) as fetch:
+            completed = PawchiveClient().complete_post_metadata([summary])
+        self.assertEqual(
+            [item.name for item in completed[0].files],
+            ["character-pack.rar"],
+        )
+        fetch.assert_called_once_with("patreon", "124138802", "101845109")
 
     def test_complete_post_metadata_fetches_missing_attachment_fields(self):
         partial = Post.from_api({
