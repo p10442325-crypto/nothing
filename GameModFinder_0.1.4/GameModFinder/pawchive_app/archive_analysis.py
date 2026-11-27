@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import tarfile
 import zipfile
 
@@ -26,7 +27,7 @@ class ArchiveInspection:
 
 
 def _validated_name(name: str) -> str:
-    value = (name or "").replace("\\\\", "/")
+    value = (name or "").replace("\\", "/")
     if not value or len(value) > MAX_MEMBER_NAME_LENGTH or "\x00" in value:
         raise ArchiveInspectionError("압축파일 안에 비정상적인 파일명이 있습니다.")
     if value.startswith("/") or re.match(r"^[A-Za-z]:", value):
@@ -78,13 +79,13 @@ def analyze_archive_for_ini(archive_path: str | Path) -> ArchiveInspection:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as archive:
                 infos = archive.infolist()
-                entries = [(info.filename, info.is_dir()) for info in infos]
+                entries = [(info.filename, info.is_dir() or stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF)) for info in infos]
             return _finish("ZIP", entries)
 
         if tarfile.is_tarfile(path):
             with tarfile.open(path, mode="r:*") as archive:
                 infos = archive.getmembers()
-                entries = [(info.name, info.isdir()) for info in infos]
+                entries = [(info.name, not info.isfile()) for info in infos]
             return _finish("TAR", entries)
 
         suffix = path.name.casefold()
@@ -97,7 +98,7 @@ def analyze_archive_for_ini(archive_path: str | Path) -> ArchiveInspection:
                 ) from exc
             with py7zr.SevenZipFile(path, mode="r") as archive:
                 names = archive.getnames()
-            return _finish("7Z", [(name, name.endswith(("/", "\\\\"))) for name in names])
+            return _finish("7Z", [(name, name.endswith(("/", "\\"))) for name in names])
 
         if suffix.endswith(".rar"):
             try:
