@@ -372,25 +372,22 @@ class PawchiveClient:
 
     @staticmethod
     def _post_needs_detail(post: Post) -> bool:
-        # Pawchive's feed records are summaries. The complete record can also
-        # contain inline/deferred files which are not represented in the
-        # summary's file/attachments fields. Only skip the detail request when
-        # the summary already proves that this is an archive post.
+        """Expand only archive/deferred references that lack a download URL.
+
+        A regular post with no archive is not an incomplete post. Expanding all
+        such records causes one extra API request per post and keeps the UI
+        locked while ordinary images are needlessly re-fetched.
+        """
         suffixes = (
             ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
             ".tgz", ".tbz2", ".txz",
         )
         for attachment in post.files:
-            candidates = [attachment.name, attachment.path]
-            parsed = urlparse(attachment.path or "")
-            for key in ("f", "filename", "name", "file"):
-                candidates.extend(parse_qs(parsed.query).get(key, []))
-            if any(
-                unquote(str(candidate or "")).split("#", 1)[0].split("?", 1)[0].casefold().endswith(suffixes)
-                for candidate in candidates
-            ):
-                return False
-        return True
+            name = unquote((attachment.name or "").strip()).casefold()
+            is_archive = name.endswith(suffixes)
+            if not attachment.path and (attachment.deferred or is_archive):
+                return True
+        return False
 
     def complete_post_metadata(
         self, posts: list[Post], *, max_workers: int = 2
