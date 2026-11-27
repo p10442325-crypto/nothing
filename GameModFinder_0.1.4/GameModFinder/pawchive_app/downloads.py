@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import bz2
+import gzip
+import lzma
 import os
 import re
 import hashlib
@@ -1135,30 +1138,96 @@ def safe_extract_rar(archive_path: str | Path, destination: str | Path) -> list[
         ) from exc
 
 
+def _extract_compressed_stream(
+    archive: Path,
+    destination: str | Path,
+    opener: Callable,
+    suffix: str,
+) -> list[Path]:
+    """Decompress a single-file GZIP/BZIP2/XZ stream into its own folder."""
+    root = Path(destination).resolve()
+    name = archive.name
+    output_name = (
+        name[:-len(suffix)]
+        if name.casefold().endswith(suffix)
+        else name + ".decompressed"
+    )
+    output_name = output_name or "decompressed"
+    target = _safe_target(root, output_name)
+    root_existed = root.exists()
+    if target.exists():
+        raise FileExistsError(f"압축 해제 대상이 이미 존재합니다: {target}")
+
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with opener(archive, "rb") as source, target.open("xb") as output:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        if not root_existed:
+            shutil.rmtree(root, ignore_errors=True)
+        raise DownloadError(
+            f"{archive.name} 단일 압축 파일을 해제하지 못했습니다: {exc}"
+        ) from exc
+    return [target]
+
+
+def _archive_output_stem(archive: Path) -> str:
+    """Strip compound TAR suffixes when naming the extracted folder."""
+    lowered = archive.name.casefold()
+    for suffix in (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2", ".txz"):
+        if lowered.endswith(suffix):
+            return archive.name[:-len(suffix)] or "archive"
+    return archive.stem or "archive"
+
+
 def safe_extract_archive(archive_path: str | Path, destination: str | Path) -> list[Path]:
-    """Safely extract ZIP, 7Z, RAR, and TAR-family archives; leave other files untouched."""
+    """Safely extract common archive formats, detecting them by content where possible."""
     archive = Path(archive_path)
     if zipfile.is_zipfile(archive):
         return safe_extract_zip(archive, destination)
     if tarfile.is_tarfile(archive):
         return safe_extract_tar(archive, destination)
 
+    with archive.open("rb") as source:
+        signature = source.read(8)
     suffix = archive.suffix.casefold()
-    if suffix == ".7z":
+    lowered_name = archive.name.casefold()
+
+    # Detect 7Z and RAR from their signatures as well as extensions. This also
+    # handles download endpoints that provide a generic or extensionless name.
+    if signature.startswith(b"7z\\xbc\\xaf\\x27\\x1c") or suffix == ".7z":
         return safe_extract_7z(archive, destination)
-    if suffix == ".rar":
+    if signature.startswith(b"Rar!\\x1a\\x07") or suffix == ".rar":
         return safe_extract_rar(archive, destination)
+
+    # TAR archives were handled above. These branches cover standalone compressed
+    # files (for example a .gz containing one DLL rather than a .tar.gz archive).
+    if signature.startswith(b"\\x1f\\x8b") or suffix == ".gz":
+        return _extract_compressed_stream(archive, destination, gzip.open, ".gz")
+    if signature.startswith(b"BZh") or suffix == ".bz2":
+        return _extract_compressed_stream(archive, destination, bz2.open, ".bz2")
+    if signature.startswith(b"\\xfd7zXZ\\x00") or suffix == ".xz":
+        return _extract_compressed_stream(archive, destination, lzma.open, ".xz")
+
+    known_archive_suffixes = (
+        ".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tar.bz2", ".tar.xz",
+        ".tgz", ".tbz2", ".txz",
+    )
+    if any(lowered_name.endswith(item) for item in known_archive_suffixes):
+        raise DownloadError(f"다운로드한 압축 파일 형식을 확인할 수 없습니다: {archive.name}")
     return []
 
 
 def extract_archive_and_remove(archive_path: str | Path) -> tuple[Path | None, list[Path]]:
-    """Extract a downloaded archive and remove its original only after successful extraction.
+    """Extract a downloaded archive and remove its original only after success.
 
-    Returns the extraction directory and extracted files. If the input is not a
-    supported archive, returns (None, []) and leaves the input unchanged.
+    Returns the extraction directory and extracted files. Non-archive inputs are
+    left untouched. Archive detection uses file signatures, so an extensionless
+    or generically named 7Z/RAR/GZIP/BZIP2/XZ download is still unpacked.
     """
     archive = Path(archive_path)
-    destination = archive.with_name(archive.stem + "_extracted")
+    destination = archive.with_name(_archive_output_stem(archive) + "_extracted")
     extracted = safe_extract_archive(archive, destination)
     if not extracted:
         return None, []
