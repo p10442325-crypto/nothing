@@ -659,6 +659,25 @@ class MegaDownloadTests(unittest.TestCase):
                 )
 
 
+class MegaCdnHostTests(unittest.TestCase):
+    def test_trusted_mega_download_hosts(self):
+        from pawchive_app.downloads import _is_trusted_mega_download_url as ok
+
+        self.assertTrue(ok("https://gfs270n123.userstorage.mega.io/abc/file"))
+        self.assertTrue(ok("https://gfs123.userstorage.mega.co.nz/dl/file"))
+        self.assertTrue(ok("https://g.api.mega.co.nz/cs/file"))
+        self.assertTrue(ok("https://mega.nz/dl/file"))
+
+    def test_untrusted_mega_download_hosts(self):
+        from pawchive_app.downloads import _is_trusted_mega_download_url as ok
+
+        self.assertFalse(ok("http://gfs1.userstorage.mega.io/file"))
+        self.assertFalse(ok("https://evilmega.io/file"))
+        self.assertFalse(ok("https://mega.io.evil.example/file"))
+        self.assertFalse(ok("https://user:pw@gfs1.userstorage.mega.io/file"))
+        self.assertFalse(ok("https://example.com/file"))
+
+
 class DownloadSafetyTests(unittest.TestCase):
     def test_only_dedicated_pawchive_file_host_is_allowed(self):
         self.assertEqual(
