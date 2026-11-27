@@ -894,7 +894,7 @@ class MainWindow(QMainWindow):
 
         self.explore_browser = PostBrowser()
         self.explore_browser.download_requested.connect(self.download_attachment)
-                self.explore_browser.load_more_requested.connect(self.load_more_explore_posts)
+        self.explore_browser.load_more_requested.connect(self.load_more_explore_posts)
         explore_layout.addWidget(self.explore_browser, 1)
         self.tabs.addTab(explore_page, "전체 탐색")
 
