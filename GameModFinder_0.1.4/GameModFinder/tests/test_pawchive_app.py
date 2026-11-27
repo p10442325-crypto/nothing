@@ -588,7 +588,12 @@ class MegaDownloadTests(unittest.TestCase):
             encrypt_attr({"n": "sample-mod-pack.zip"}, derived_key)
         )
         from Crypto.Util import Counter
-        counter = Counter.new(128, initial_value=(iv0 << 32) + (iv1 << 64))
+        counter = Counter.new(
+            128,
+            initial_value=int.from_bytes(
+                a32_to_str((iv0, iv1, 0, 0)), "big"
+            ),
+        )
         encrypted_payload = AES.new(
             key_bytes, AES.MODE_CTR, counter=counter
         ).encrypt(plain)
@@ -651,6 +656,14 @@ class MegaDownloadTests(unittest.TestCase):
                 "https://gfs270n457.userstorage.mega.co.nz/dl/public-file",
             )
             self.assertTrue(fake._http.closed)
+
+    def test_mega_ctr_counter_places_iv_in_high_64_bits(self):
+        from mega.crypto import a32_to_str
+        from pawchive_app.downloads import _mega_ctr_initial_value
+
+        iv0, iv1 = 0x12345678, 0x23456789
+        expected = int.from_bytes(a32_to_str((iv0, iv1, 0, 0)), "big")
+        self.assertEqual(_mega_ctr_initial_value((iv0, iv1)), expected)
 
     def test_mega_public_file_download_rejects_non_mega_hosts(self):
         from pawchive_app.downloads import download_mega_file
