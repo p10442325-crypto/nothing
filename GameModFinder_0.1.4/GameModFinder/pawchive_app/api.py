@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock, local
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -32,6 +34,7 @@ class PawchiveClient:
         self.min_interval = max(1.0, float(min_interval))
         self.user_agent = user_agent
         self._last_request = 0.0
+        self.last_detail_failures = 0
         self._playwright = None
         self._browser = None
         self._context = None
@@ -338,13 +341,94 @@ class PawchiveClient:
         return result
 
     def post_detail(self, service: str, creator_id: str, post_id: str) -> dict[str, Any]:
+        """Fetch one complete post, accepting the response wrappers used by Pawchive."""
         path = (
             f"/{quote(service, safe='')}/user/{quote(creator_id, safe='')}"
             f"/post/{quote(post_id, safe='')}"
         )
         payload = self._get_json(path)
-        if isinstance(payload, dict) and isinstance(payload.get("post"), dict):
-            return payload["post"]
-        if isinstance(payload, dict):
-            return payload
-        raise PawchiveError("게시물 상세 응답 형식이 예상과 다릅니다.")
+        candidates: list[dict[str, Any]] = []
+        if isinstance(payload, list):
+            candidates = [item for item in payload if isinstance(item, dict)]
+        elif isinstance(payload, dict):
+            for candidate in (
+                payload.get("post"),
+                (payload.get("data") or {}).get("post")
+                if isinstance(payload.get("data"), dict) else None,
+                payload.get("data"),
+                payload,
+            ):
+                if isinstance(candidate, dict) and candidate not in candidates:
+                    candidates.append(candidate)
+
+        expected = str(post_id)
+        for candidate in candidates:
+            candidate_id = str(candidate.get("id") or candidate.get("post_id") or "")
+            if candidate_id == expected:
+                return candidate
+        if len(candidates) == 1 and not (candidates[0].get("id") or candidates[0].get("post_id")):
+            raise PawchiveError("게시물 상세 응답에 게시물 ID가 없습니다.")
+        raise PawchiveError("게시물 상세 응답에서 요청한 게시물을 찾지 못했습니다.")
+
+    @staticmethod
+    def _post_needs_detail(post: Post) -> bool:
+        # The feed endpoints can return lightweight/partial post records.
+        # File and attachments metadata must both be present before deciding
+        # that a post has no archive attachments.
+        raw = post.raw or {}
+        return "file" not in raw or "attachments" not in raw
+
+    def complete_post_metadata(
+        self, posts: list[Post], *, max_workers: int = 2
+    ) -> list[Post]:
+        """Fill missing attachment metadata from each post's detail endpoint.
+
+        Keep list order and preserve the list response if an individual detail
+        request fails, so one incomplete record cannot discard an entire page.
+        """
+        pending = [post for post in posts if self._post_needs_detail(post)]
+        self.last_detail_failures = 0
+        if not pending:
+            return posts
+
+        worker_state = local()
+        clients: list[PawchiveClient] = []
+        clients_lock = Lock()
+
+        def complete(post: Post) -> Post:
+            client = getattr(worker_state, "client", None)
+            if client is None:
+                client = PawchiveClient(
+                    api_base=self.api_base,
+                    timeout=self.timeout,
+                    min_interval=self.min_interval,
+                    user_agent=self.user_agent,
+                )
+                worker_state.client = client
+                with clients_lock:
+                    clients.append(client)
+            try:
+                detail = client.post_detail(post.service, post.creator_id, post.post_id)
+                merged = dict(post.raw)
+                merged.update(detail)
+                merged.setdefault("id", post.post_id)
+                merged.setdefault("service", post.service)
+                merged.setdefault("user", post.creator_id)
+                return Post.from_api(
+                    merged,
+                    Creator(service=post.service, creator_id=post.creator_id),
+                )
+            except Exception:
+                with clients_lock:
+                    self.last_detail_failures += 1
+                return post
+
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), 2))) as pool:
+                replacements = list(pool.map(complete, pending))
+        finally:
+            for client in clients:
+                client.close()
+
+        by_key = {post.key: post for post in replacements}
+        return [by_key.get(post.key, post) for post in posts]
