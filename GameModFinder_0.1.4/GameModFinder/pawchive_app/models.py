@@ -20,30 +20,36 @@ class Attachment:
     name: str
     path: str
     kind: str = "attachment"
+    deferred: bool = False
 
     @classmethod
     def from_api(cls, value: Any, kind: str = "attachment") -> "Attachment | None":
-        # Pawchive payloads may represent the primary file as either an object
-        # or a plain URL/path string. Keep the original path for downloading.
+        # Pawchive may return a deferred file reference with a name but no path.
+        # The actual download URL is supplied later by the post-detail endpoint.
         if isinstance(value, str):
             path = value.strip()
             name = ""
+            deferred = False
         elif isinstance(value, dict):
             name = _string(
                 value.get("name") or value.get("filename")
                 or value.get("original_name") or value.get("file_name")
                 or value.get("original_filename") or value.get("filename_orig")
             )
-            # Pawchive may expose over-limit files through a temporary URL.
-            # Such URLs are valid file sources even when "deferred" is absent.
             path = _string(
-                value.get("path") or value.get("url")
-                or value.get("download_url") or value.get("temp_url")
-                or value.get("temporary_url") or value.get("file_url")
-                or value.get("original_url") or value.get("download_path")
-                or value.get("temp_path") or value.get("href")
+                value.get("path") or value.get("temp_download_url")
+                or value.get("temp_url") or value.get("url")
+                or value.get("download_url") or value.get("temporary_url")
+                or value.get("file_url") or value.get("original_url")
+                or value.get("download_path") or value.get("temp_path")
+                or value.get("href")
             )
-            if not path:
+            deferred_value = value.get("deferred")
+            deferred = (
+                deferred_value is True
+                or str(deferred_value).strip().casefold() in {"1", "true", "yes"}
+            )
+            if not path and not name:
                 nested = value.get("file")
                 if isinstance(nested, (str, dict)):
                     return cls.from_api(nested, kind)
@@ -51,19 +57,19 @@ class Attachment:
         else:
             return None
 
-        if not path:
-            return None
         parsed = urlparse(path)
-        if not name:
+        if not name and path:
             query_names = parse_qs(parsed.query)
             name = next(
                 (query_names[key][0] for key in ("f", "filename", "name", "file")
                  if query_names.get(key)),
                 "",
             )
-        if not name:
+        if not name and path:
             name = unquote(parsed.path.rsplit("/", 1)[-1])
-        return cls(name=name or path, path=path, kind=kind)
+        if not name and not path:
+            return None
+        return cls(name=name or path, path=path, kind=kind, deferred=deferred)
 
 
 @dataclass(frozen=True, slots=True)
