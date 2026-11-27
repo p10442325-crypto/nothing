@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, local
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .models import Creator, Post
