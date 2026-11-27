@@ -56,6 +56,19 @@ class DesktopSmokeTests(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
+    def test_startup_does_not_lock_ui_with_an_automatic_roster_sync(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {"APPDATA": temp_dir, "LOCALAPPDATA": temp_dir}
+        ):
+            with patch.object(ui.MainWindow, "_load_creators"), patch.object(
+                ui.MainWindow, "_load_following_local"
+            ), patch.object(ui.QTimer, "singleShot") as single_shot:
+                window = MainWindow()
+            single_shot.assert_not_called()
+            self.assertTrue(window.sync_timer.isActive())
+            window.close()
+            self.app.processEvents()
+
     def test_post_browser_opens_full_width_detail_and_returns_to_title_list(self):
         browser = ui.PostBrowser()
         image_only = Post.from_api({
