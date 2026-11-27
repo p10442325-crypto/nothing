@@ -1024,6 +1024,31 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda w=worker: self.workers.discard(w))
         worker.start()
 
+    def _run_progress_task(
+        self,
+        label: str,
+        task: Callable[[Callable[[str], None]], object],
+        on_success: Callable[[object], None],
+        on_failure: Callable[[str], None] | None = None,
+    ) -> None:
+        if any(worker.isRunning() for worker in self.workers):
+            QMessageBox.information(self, "작업 진행 중", "현재 작업이 끝난 뒤 다시 시도해 주세요.")
+            return
+        self.status.setText(label)
+        worker_ref: dict[str, TaskThread] = {}
+
+        def execute():
+            return task(lambda message: worker_ref["worker"].progress.emit(message))
+
+        worker = TaskThread(execute)
+        worker_ref["worker"] = worker
+        self.workers.add(worker)
+        worker.progress.connect(self.status.setText)
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(on_failure or self._task_failed)
+        worker.finished.connect(lambda current=worker: self.workers.discard(current))
+        worker.start()
+
     def _run_download_task(self, label: str, task: Callable[[], object],
                            on_success: Callable[[object], None]) -> None:
         active = [worker for worker in self.download_workers if worker.isRunning()]
