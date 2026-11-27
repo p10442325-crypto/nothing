@@ -1803,18 +1803,10 @@ class MainWindow(QMainWindow):
                     # Downloads HTML section, not as an API attachment field.
                     saved = download_from_post_page(file_error)
 
-            extracted = []
-            extraction_dir = None
-            try:
-                extraction_dir, extracted = extract_archive_and_remove(saved)
-            except (ValueError, DownloadError, OSError):
-                # Non-archive files are expected. Archive safety/extraction errors
-                # are surfaced, and the original archive is kept if extraction fails.
-                if saved.name.casefold().endswith(
-                    (".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tar.bz2",
-                     ".tar.xz", ".tgz", ".tbz2", ".txz")
-                ):
-                    raise
+            # Non-archive files are returned unchanged. Any detected archive must
+            # unpack successfully before its original is removed; extraction errors
+            # are allowed to reach the UI instead of leaving an unnoticed archive.
+            extraction_dir, extracted = extract_archive_and_remove(saved)
 
             # For successfully extracted archives, show and record the folder
             # because the downloaded archive has now been removed.
