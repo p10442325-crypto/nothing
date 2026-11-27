@@ -372,12 +372,34 @@ class PawchiveClient:
 
     @staticmethod
     def _post_needs_detail(post: Post) -> bool:
-        """Expand only archive/deferred references that lack a download URL.
+        """Expand incomplete list records and deferred archives, not full posts.
 
-        A regular post with no archive is not an incomplete post. Expanding all
-        such records causes one extra API request per post and keeps the UI
-        locked while ordinary images are needlessly re-fetched.
+        Pawchive list records can be partial even when they contain no filename
+        yet. Use the API's completeness hints before deciding that a post has
+        no archive; otherwise a page can report hundreds of fetched posts while
+        the archive-only browser incorrectly shows zero.
         """
+        raw = post.raw if isinstance(post.raw, dict) else {}
+        if raw.get("detail_fetched") is False or raw.get("has_full") is False:
+            return True
+        if any(raw.get(flag) is True for flag in (
+            "partial", "is_partial", "truncated", "is_truncated",
+        )):
+            return True
+        if "substring" in raw and "content" not in raw:
+            return True
+
+        # Some list records expose a file count before all file references.
+        supplied_files = len(post.files)
+        for field_name in ("attachment_count", "attachments_count", "file_count"):
+            value = raw.get(field_name)
+            try:
+                known_count = int(value)
+            except (TypeError, ValueError):
+                continue
+            if known_count > supplied_files:
+                return True
+
         suffixes = (
             ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
             ".tgz", ".tbz2", ".txz",
