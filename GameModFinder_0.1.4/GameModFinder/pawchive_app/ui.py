@@ -1631,8 +1631,44 @@ class MainWindow(QMainWindow):
         folder.mkdir(parents=True, exist_ok=True)
 
         def task():
+            resolved_attachment = attachment
+            if attachment.deferred or not attachment.path:
+                # Deferred Pawchive references deliberately omit their stable
+                # path. Resolve a fresh signed URL only when the user chooses
+                # to download that file, not while browsing the creator.
+                with self._client() as client:
+                    detail = client.post_detail(
+                        post.service, post.creator_id, post.post_id
+                    )
+                merged = dict(post.raw)
+                merged.update(detail)
+                merged.setdefault("id", post.post_id)
+                merged.setdefault("service", post.service)
+                merged.setdefault("user", post.creator_id)
+                refreshed_post = Post.from_api(
+                    merged,
+                    Creator(service=post.service, creator_id=post.creator_id),
+                )
+                self.database.save_posts([refreshed_post])
+                matches = [
+                    item for item in refreshed_post.files
+                    if item.name.casefold() == attachment.name.casefold()
+                    and item.path
+                ]
+                if not matches and attachment.kind:
+                    matches = [
+                        item for item in refreshed_post.files
+                        if item.kind == attachment.kind and item.path
+                    ]
+                if not matches:
+                    raise DownloadError(
+                        "Pawchive에서 이 지연 첨부파일의 임시 다운로드 주소를 "
+                        "가져오지 못했습니다. 게시물 원문에서 파일 상태를 확인해 주세요."
+                    )
+                resolved_attachment = matches[0]
+
             saved = download_file(
-                attachment.path, target,
+                resolved_attachment.path, target,
                 session_cookie=self.settings.get("session_key") or None,
                 filename=attachment.name,
             )
@@ -1641,7 +1677,7 @@ class MainWindow(QMainWindow):
                 extracted = safe_extract_archive(saved, saved.parent / (saved.stem + "_extracted"))
             except (ValueError, DownloadError, OSError) as exc:
                 # Non-archive files are expected. ZIP safety failures are surfaced to the user.
-                if saved.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"}:
+                if saved.suffix.lower() in {".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"}:
                     raise
             self.database.record_download(
                 post.service, post.creator_id, post.post_id, str(saved),
