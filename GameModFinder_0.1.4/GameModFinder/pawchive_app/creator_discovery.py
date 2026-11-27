@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import re
 from tempfile import TemporaryDirectory
 from typing import Callable, Iterable
@@ -16,7 +17,7 @@ ARCHIVE_SUFFIXES = (
     ".tgz", ".tbz2", ".txz", ".tar.gz", ".tar.bz2", ".tar.xz",
 )
 MAX_SEARCH_PAGES = 20
-MAX_SEARCH_QUERIES = 20
+MAX_SEARCH_QUERIES = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,51 @@ class CreatorDiscoveryResult:
     creators_found: int
     errors: tuple[str, ...]
 
+
+def load_game_catalog(path: str | Path | None = None) -> dict[str, dict]:
+    """Load the bundled game -> character alias catalogue."""
+    source = Path(path) if path else Path(__file__).resolve().parent.parent / "data" / "game_aliases.json"
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): value for key, value in payload.items() if isinstance(value, dict) and isinstance(value.get("characters"), dict)}
+
+
+def game_search_terms(game: dict) -> list[str]:
+    """Build broad Pawchive search terms from a game's names and character aliases."""
+    values = [str(game.get("name") or "")]
+    aliases = game.get("aliases", [])
+    if isinstance(aliases, list):
+        values.extend(str(value) for value in aliases)
+    characters = game.get("characters", {})
+    if isinstance(characters, dict):
+        for character, names in characters.items():
+            values.append(str(character))
+            if isinstance(names, list):
+                values.extend(str(value) for value in names)
+    return parse_search_queries("\n".join(values))
+
+
+def _post_matches_discovery_term(post: Post, query: str, *, include_title: bool, include_content: bool) -> bool:
+    if post_matches_search_fields(post, query, include_title=include_title, include_content=include_content):
+        return True
+    terms = [term.casefold() for term in query.split() if term]
+    if not terms:
+        return True
+    parts = [f"{item.name} {item.path}" for item in post.files]
+    for key in ("tags", "tag", "labels", "categories"):
+        value = post.raw.get(key)
+        if isinstance(value, (str, int)):
+            parts.append(str(value))
+        elif isinstance(value, list):
+            parts.extend(str(item) for item in value if isinstance(item, (str, int)))
+        elif isinstance(value, dict):
+            parts.extend(str(item) for item in value.values() if isinstance(item, (str, int)))
+    searchable = " ".join(parts).casefold()
+    return bool(searchable) and all(term in searchable for term in terms)
 
 def parse_search_queries(value: str) -> list[str]:
     """Split user-entered character names on commas, semicolons or newlines."""
@@ -109,11 +155,8 @@ def scan_mod_creator_candidates(
             posts = client.recent_posts(query, offset=offset)
             pages_fetched += 1
             for post in posts:
-                if not post_matches_search_fields(
-                    post,
-                    query,
-                    include_title=include_title,
-                    include_content=include_content,
+                if not _post_matches_discovery_term(
+                    post, query, include_title=include_title, include_content=include_content
                 ):
                     continue
                 archives = [
