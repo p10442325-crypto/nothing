@@ -144,7 +144,24 @@ class Post:
 
         def add_attachment(item: Any, kind: str = "attachment") -> None:
             attachment = Attachment.from_api(item, kind)
-            if attachment and attachment.path not in {entry.path for entry in found}:
+            if not attachment:
+                return
+            if attachment.path:
+                duplicate = any(
+                    entry.path and entry.path == attachment.path
+                    for entry in found
+                )
+            else:
+                # Several deferred refs can all lack a path in list responses.
+                # An empty path is not a unique identity and must not collapse
+                # a RAR attachment into an earlier pathless preview image.
+                identity = (attachment.name.casefold(), attachment.kind)
+                duplicate = any(
+                    not entry.path
+                    and (entry.name.casefold(), entry.kind) == identity
+                    for entry in found
+                )
+            if not duplicate:
                 found.append(attachment)
 
         add_attachment(value.get("file"), "file")
