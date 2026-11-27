@@ -172,6 +172,18 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(post.files[0].path, url)
         self.assertEqual(post.files[0].name, "MEGA 외부 파일 링크")
 
+    def test_is_mega_embed_and_mega_io_links_are_supported(self):
+        from pawchive_app.models import is_mega_file_url
+        url = "https://mega.io/embed/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        self.assertTrue(is_mega_file_url(url))
+
+    def test_extract_mega_io_embed_link_from_post_html(self):
+        url = "https://mega.io/embed/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        links = extract_mega_links_from_post_html(
+            '<h2>Downloads</h2><a href="' + url + '">Archive</a>',
+            "https://pawchive.pw/patreon/user/124138802/post/172109941",
+        )
+        self.assertEqual(links, [(url, "Archive")])
     def test_post_extracts_mega_link_from_rendered_downloads_section(self):
         url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
         page_html = (
