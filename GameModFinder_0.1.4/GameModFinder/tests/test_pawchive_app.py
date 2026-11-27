@@ -626,7 +626,7 @@ class MegaDownloadTests(unittest.TestCase):
             def _api_request(self, payload):
                 self.api_payload = payload
                 return {
-                    "g": ["https://gfs123.userstorage.mega.co.nz/dl/public-file"],
+                    "g": ["http://gfs270n457.userstorage.mega.co.nz/dl/public-file"],
                     "s": len(plain),
                     "at": encrypted_attr,
                 }
@@ -646,6 +646,10 @@ class MegaDownloadTests(unittest.TestCase):
             self.assertEqual(saved.read_bytes(), plain)
             self.assertEqual(fake.api_payload, {"a": "g", "g": 1, "p": "BzcjlbzZ"})
             self.assertEqual(progress[-1], (len(plain), len(plain)))
+            self.assertEqual(
+                fake._http.request[1],
+                "https://gfs270n457.userstorage.mega.co.nz/dl/public-file",
+            )
             self.assertTrue(fake._http.closed)
 
     def test_mega_public_file_download_rejects_non_mega_hosts(self):
@@ -669,6 +673,40 @@ class MegaCdnHostTests(unittest.TestCase):
         self.assertEqual(_single_mega_download_url([[url]]), url)
         with self.assertRaisesRegex(DownloadError, "CloudRAID"):
             _single_mega_download_url([url, url])
+
+    def test_http_mega_storage_url_is_upgraded_to_https(self):
+        from pawchive_app.downloads import _normalize_mega_download_url
+
+        self.assertEqual(
+            _normalize_mega_download_url(
+                "http://gfs270n457.userstorage.mega.co.nz/dl/file?token=abc"
+            ),
+            "https://gfs270n457.userstorage.mega.co.nz/dl/file?token=abc",
+        )
+        self.assertEqual(
+            _normalize_mega_download_url(
+                "https://gfs270n457.userstorage.mega.co.nz/dl/file"
+            ),
+            "https://gfs270n457.userstorage.mega.co.nz/dl/file",
+        )
+
+    def test_http_non_mega_download_host_is_rejected(self):
+        from pawchive_app.downloads import _normalize_mega_download_url
+
+        with self.assertRaisesRegex(DownloadError, "허용되지 않은 다운로드 서버"):
+            _normalize_mega_download_url("http://evil.example/file")
+
+    def test_http_mega_download_with_credentials_or_nonstandard_port_is_rejected(self):
+        from pawchive_app.downloads import _normalize_mega_download_url
+
+        with self.assertRaises(DownloadError):
+            _normalize_mega_download_url(
+                "http://user:pass@gfs270n457.userstorage.mega.co.nz/file"
+            )
+        with self.assertRaises(DownloadError):
+            _normalize_mega_download_url(
+                "http://gfs270n457.userstorage.mega.co.nz:8080/file"
+            )
 
     def test_mega_server_diagnostic_only_exposes_scheme_and_host(self):
         from pawchive_app.downloads import _mega_download_server_identity
