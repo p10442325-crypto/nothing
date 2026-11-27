@@ -155,6 +155,7 @@ def scan_mod_creator_candidates(
                 f"· 페이지 {page_index + 1}/{page_limit}"
             )
             posts = client.recent_posts(query, offset=offset)
+            posts = client.complete_post_metadata(posts)
             pages_fetched += 1
             for post in posts:
                 if not _post_matches_discovery_term(
