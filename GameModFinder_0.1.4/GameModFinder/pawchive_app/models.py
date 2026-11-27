@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import html
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 import re
 
 
@@ -23,13 +23,41 @@ class Attachment:
 
     @classmethod
     def from_api(cls, value: Any, kind: str = "attachment") -> "Attachment | None":
-        if not isinstance(value, dict):
+        # Pawchive payloads may represent the primary file as either an object
+        # or a plain URL/path string. Keep the original path for downloading.
+        if isinstance(value, str):
+            path = value.strip()
+            name = ""
+        elif isinstance(value, dict):
+            name = _string(
+                value.get("name") or value.get("filename")
+                or value.get("original_name") or value.get("file_name")
+            )
+            path = _string(
+                value.get("path") or value.get("url")
+                or value.get("download_url") or value.get("href")
+            )
+            if not path:
+                nested = value.get("file")
+                if isinstance(nested, (str, dict)):
+                    return cls.from_api(nested, kind)
+                return None
+        else:
             return None
-        name = _string(value.get("name") or value.get("filename"))
-        path = _string(value.get("path") or value.get("url"))
+
         if not path:
             return None
-        return cls(name=name or path.rsplit("/", 1)[-1], path=path, kind=kind)
+        parsed = urlparse(path)
+        if not name:
+            query_names = parse_qs(parsed.query)
+            name = next(
+                (query_names[key][0] for key in ("f", "filename", "name")
+                 if query_names.get(key)),
+                "",
+            )
+        if not name:
+            name = unquote(parsed.path.rsplit("/", 1)[-1])
+        return cls(name=name or path, path=path, kind=kind)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,16 +129,36 @@ class Post:
             raise ValueError("Post response is missing service, user, or id")
 
         found: list[Attachment] = []
-        primary = Attachment.from_api(value.get("file"), "file")
-        if primary:
-            found.append(primary)
-        for item in value.get("attachments") or []:
-            attachment = Attachment.from_api(item)
-            if attachment and attachment.path not in {f.path for f in found}:
+
+        def add_attachment(item: Any, kind: str = "attachment") -> None:
+            attachment = Attachment.from_api(item, kind)
+            if attachment and attachment.path not in {entry.path for entry in found}:
                 found.append(attachment)
-        shared = Attachment.from_api(value.get("shared_file"), "shared_file")
-        if shared and shared.path not in {f.path for f in found}:
-            found.append(shared)
+
+        add_attachment(value.get("file"), "file")
+
+        # Accept both arrays and filename-keyed maps. Some API responses use
+        # "files" while others use "attachments".
+        for field_name in ("attachments", "files"):
+            raw_items = value.get(field_name)
+            if isinstance(raw_items, list):
+                for item in raw_items:
+                    add_attachment(item, field_name)
+            elif isinstance(raw_items, dict):
+                if any(key in raw_items for key in (
+                    "name", "filename", "path", "url", "download_url", "href", "file"
+                )):
+                    add_attachment(raw_items, field_name)
+                else:
+                    for filename, item in raw_items.items():
+                        if isinstance(item, str):
+                            add_attachment({"name": filename, "path": item}, field_name)
+                        elif isinstance(item, dict):
+                            normalized = dict(item)
+                            normalized.setdefault("name", filename)
+                            add_attachment(normalized, field_name)
+
+        add_attachment(value.get("shared_file"), "shared_file")
 
         return cls(
             service=service,
