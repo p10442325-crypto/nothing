@@ -1622,6 +1622,20 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.discover_page)
 
     def download_attachment(self, post: Post, attachment: Attachment) -> None:
+        if attachment.kind == "external_link":
+            parsed = QUrl(attachment.path)
+            allowed_hosts = {
+                "mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz",
+            }
+            if parsed.scheme() != "https" or parsed.host().lower() not in allowed_hosts:
+                QMessageBox.warning(
+                    self, "외부 링크 확인", "지원하지 않는 외부 다운로드 주소입니다."
+                )
+                return
+            QDesktopServices.openUrl(parsed)
+            self.status.setText("MEGA 외부 다운로드 링크를 브라우저에서 열었습니다.")
+            return
+
         paths = {"공통 저장 폴더": self.settings.get("download_dir", "")}
         for name, folder in self.settings.get("game_paths", {}).items():
             paths[f"{name} 저장 폴더"] = folder
