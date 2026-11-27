@@ -679,6 +679,17 @@ def _single_mega_download_url(value: object) -> str:
     return value.strip()
 
 
+def _mega_download_server_identity(url: str) -> str:
+    """Return non-sensitive URL diagnostics without exposing path or query tokens."""
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower() or "(host 없음)"
+        scheme = parsed.scheme.lower() or "(scheme 없음)"
+        return f"scheme={scheme}, host={host}"
+    except ValueError:
+        return "URL 형식=잘못됨"
+
+
 def download_mega_file(
     url: str,
     destination_dir: str | Path,
@@ -759,7 +770,14 @@ def download_mega_file(
 
         file_url = _single_mega_download_url(file_data["g"])
         if not _is_trusted_mega_download_url(file_url):
-            raise DownloadError("MEGA가 안전하지 않은 다운로드 서버 주소를 반환했습니다.")
+            # Keep this diagnostic deliberately limited to scheme + hostname;
+            # MEGA's temporary URL path/query must never be copied into logs or UI.
+            identity = _mega_download_server_identity(file_url)
+            raise DownloadError(
+                "MEGA 다운로드 서버 보안 검증에 실패했습니다 "
+                f"({identity}). 허용된 MEGA HTTPS 도메인이 아닙니다. "
+                "이 주소는 보안상 차단했습니다."
+            )
 
         try:
             file_size = int(file_data["s"])
