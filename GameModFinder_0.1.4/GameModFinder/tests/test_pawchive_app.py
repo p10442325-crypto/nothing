@@ -626,7 +626,7 @@ class MegaDownloadTests(unittest.TestCase):
             def _api_request(self, payload):
                 self.api_payload = payload
                 return {
-                    "g": "https://gfs123.userstorage.mega.co.nz/dl/public-file",
+                    "g": ["https://gfs123.userstorage.mega.co.nz/dl/public-file"],
                     "s": len(plain),
                     "at": encrypted_attr,
                 }
@@ -660,6 +660,16 @@ class MegaDownloadTests(unittest.TestCase):
 
 
 class MegaCdnHostTests(unittest.TestCase):
+    def test_single_mega_download_url_accepts_api_singleton_array(self):
+        from pawchive_app.downloads import _single_mega_download_url
+
+        url = "https://gfs123.userstorage.mega.co.nz/dl/file"
+        self.assertEqual(_single_mega_download_url(url), url)
+        self.assertEqual(_single_mega_download_url([url]), url)
+        self.assertEqual(_single_mega_download_url([[url]]), url)
+        with self.assertRaisesRegex(DownloadError, "CloudRAID"):
+            _single_mega_download_url([url, url])
+
     def test_trusted_mega_download_hosts(self):
         from pawchive_app.downloads import _is_trusted_mega_download_url as ok
 
