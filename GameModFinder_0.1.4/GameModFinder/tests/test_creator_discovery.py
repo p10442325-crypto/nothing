@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pawchive_app.creator_discovery import (
+    game_search_terms,
+    load_game_catalog,
     parse_search_queries,
     scan_mod_creator_candidates,
 )
@@ -46,6 +48,15 @@ class CreatorDiscoveryTests(unittest.TestCase):
             parse_search_queries("Tifa Lockhart, 2B; tifa lockhart\nRaiden Shogun"),
             ["Tifa Lockhart", "2B", "Raiden Shogun"],
         )
+
+    def test_game_catalog_builds_search_terms_from_character_aliases(self):
+        catalog = load_game_catalog()
+        self.assertIn("genshin", catalog)
+        terms = game_search_terms(catalog["genshin"])
+        self.assertIn("Genshin Impact", terms)
+        self.assertIn("Raiden Shogun", terms)
+        self.assertIn("라이덴 쇼군", terms)
+        self.assertGreater(len(terms), 10)
 
     def test_scanner_checks_archive_members_and_groups_only_matching_creators(self):
         ini_post = Post.from_api({
