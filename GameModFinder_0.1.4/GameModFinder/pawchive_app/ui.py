@@ -829,7 +829,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.creator_list)
         self.creator_browser = PostBrowser()
         self.creator_browser.download_requested.connect(self.download_attachment)
-                splitter.addWidget(self.creator_browser)
+        splitter.addWidget(self.creator_browser)
         splitter.setSizes([300, 920])
         creators_layout.addWidget(splitter, 1)
         self.tabs.addTab(creators_page, "크리에이터")
