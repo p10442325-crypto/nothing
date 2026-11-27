@@ -262,6 +262,16 @@ class PostBrowser(QWidget):
         return any(lowered.endswith(suffix) for suffix in cls.ARCHIVE_SUFFIXES)
 
     @classmethod
+    def _is_archive_attachment(cls, attachment: Attachment) -> bool:
+        # MEGA-hosted archives are represented as external links because the
+        # URL fragment contains a decryption key and needs the MEGA web client.
+        return (
+            attachment.kind == "external_link"
+            or cls._is_archive(attachment.name)
+            or cls._is_archive(attachment.path)
+        )
+
+    @classmethod
     def _is_image(cls, filename: str) -> bool:
         return Path(filename or "").suffix.lower() in cls.IMAGE_SUFFIXES
 
@@ -344,7 +354,7 @@ class PostBrowser(QWidget):
         }
         for post in posts:
             if not any(
-                self._is_archive(attachment.name) or self._is_archive(attachment.path)
+                self._is_archive_attachment(attachment)
                 for attachment in post.files
             ):
                 continue
@@ -573,7 +583,7 @@ class PostBrowser(QWidget):
         self._clear_attachment_cards()
         archive_files = [
             attachment for attachment in post.files
-            if self._is_archive(attachment.name) or self._is_archive(attachment.path)
+            if self._is_archive_attachment(attachment)
         ]
         if not archive_files:
             return
@@ -584,12 +594,13 @@ class PostBrowser(QWidget):
             card.setObjectName("AttachmentCard")
             row = QHBoxLayout(card)
             row.setContentsMargins(9, 7, 9, 7)
-            icon = QLabel("📦")
+            is_external = attachment.kind == "external_link"
+            icon = QLabel("🔗" if is_external else "📦")
             icon.setMinimumWidth(28)
             filename = QLabel(attachment.name or attachment.path.rsplit("/", 1)[-1])
             filename.setWordWrap(True)
             filename.setToolTip(attachment.path)
-            button = QPushButton("다운로드")
+            button = QPushButton("링크 열기" if is_external else "다운로드")
             button.setObjectName("Primary")
             button.clicked.connect(
                 lambda checked=False, selected=attachment, source=post:
