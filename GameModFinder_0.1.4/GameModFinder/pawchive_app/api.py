@@ -372,11 +372,25 @@ class PawchiveClient:
 
     @staticmethod
     def _post_needs_detail(post: Post) -> bool:
-        # The feed endpoints can return lightweight/partial post records.
-        # File and attachments metadata must both be present before deciding
-        # that a post has no archive attachments.
-        raw = post.raw or {}
-        return "file" not in raw or "attachments" not in raw
+        # Pawchive's feed records are summaries. The complete record can also
+        # contain inline/deferred files which are not represented in the
+        # summary's file/attachments fields. Only skip the detail request when
+        # the summary already proves that this is an archive post.
+        suffixes = (
+            ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz",
+            ".tgz", ".tbz2", ".txz",
+        )
+        for attachment in post.files:
+            candidates = [attachment.name, attachment.path]
+            parsed = urlparse(attachment.path or "")
+            for key in ("f", "filename", "name", "file"):
+                candidates.extend(parse_qs(parsed.query).get(key, []))
+            if any(
+                unquote(str(candidate or "")).split("#", 1)[0].split("?", 1)[0].casefold().endswith(suffixes)
+                for candidate in candidates
+            ):
+                return False
+        return True
 
     def complete_post_metadata(
         self, posts: list[Post], *, max_workers: int = 2
