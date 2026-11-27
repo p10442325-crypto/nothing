@@ -191,6 +191,25 @@ class DesktopSmokeTests(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
+    def test_post_browser_shows_mega_link_post_as_external_link_card(self):
+        url = "https://mega.nz/file/BzcjlbzZ#uUyY2jXxQ8eg5bhf111h46KPwnkU5Dwtjh_jBLiyYYw"
+        post = Post.from_api({
+            "id": "101845109",
+            "service": "patreon",
+            "user": "124138802",
+            "title": "MEGA 링크 게시물",
+            "content": f'<a href="{url}">Download</a>',
+        })
+        browser = ui.PostBrowser()
+        with patch.object(ui.PostBrowser, "_thumbnail_url_for_post", return_value=""):
+            browser.set_posts([post])
+        self.assertEqual(len(browser.posts), 1)
+        self.assertEqual(browser.list_count.text(), "1개")
+        browser._populate_attachment_cards(post)
+        self.assertEqual(len(browser.attachment_buttons), 1)
+        self.assertEqual(browser.attachment_buttons[0].text(), "링크 열기")
+        browser.close()
+
     def test_post_browser_appends_next_page_without_resetting_local_search(self):
         first = Post.from_api({
             "id": "page-1",
