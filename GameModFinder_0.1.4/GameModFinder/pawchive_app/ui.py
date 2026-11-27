@@ -21,7 +21,9 @@ from PySide6.QtWidgets import (
 from .api import PawchiveClient, PawchiveError
 from .downloads import (DownloadError, download_file, fetch_thumbnail_bytes, resolve_thumbnail_url, safe_extract_archive)
 from .models import Attachment, Creator, Post, parse_creator_url, post_matches_search_fields
-from .creator_discovery import parse_search_queries, scan_mod_creator_candidates
+from .creator_discovery import (
+    game_search_terms, load_game_catalog, parse_search_queries, scan_mod_creator_candidates,
+)
 from .repository import LocalRepository
 from .updater import UpdateCheck, UpdateError, UpdateManager, UpdatePackage
 
@@ -898,13 +900,13 @@ class MainWindow(QMainWindow):
         explore_layout.addWidget(self.explore_browser, 1)
         self.tabs.addTab(explore_page, "전체 탐색")
 
-        # Automated character-search -> archive INI scan -> creator candidates.
+        # Game-first creator discovery driven by bundled character aliases.
         candidate_page = QWidget()
         candidate_layout = QVBoxLayout(candidate_page)
         candidate_intro = QLabel(
-            "캐릭터 이름이나 영문 별칭을 입력하면 Pawchive 게시물을 자동 검색하고, "
-            "압축파일을 임시로 내려받아 내부에 .ini 파일이 있는지 검사합니다. "
-            "INI가 발견된 게시물의 작성자를 후보 목록에 모읍니다."
+            "게임을 선택하면 내장된 캐릭터 이름과 한국어·영어·일본어·중국어 별칭으로 Pawchive를 검색합니다. "
+            "게시물 제목·내용, 태그, 첨부파일 이름을 확인하고 압축파일 내부의 .ini 파일을 검사해 "
+            "해당 게임 모드 제작자 후보를 모읍니다. 게시물에 게임 이름이 없어도 캐릭터 이름으로 찾습니다."
         )
         candidate_intro.setWordWrap(True)
         candidate_intro.setObjectName("Subtle")
@@ -913,13 +915,24 @@ class MainWindow(QMainWindow):
         scan_panel = QFrame()
         scan_panel.setObjectName("Panel")
         scan_panel_layout = QVBoxLayout(scan_panel)
-        scan_panel_layout.addWidget(QLabel("캐릭터 검색어"))
+        game_row = QHBoxLayout()
+        game_row.addWidget(QLabel("대상 게임"))
+        self.mod_scan_game_combo = QComboBox()
+        self.mod_scan_game_combo.addItem("게임 선택", "")
+        self._mod_scan_game_catalog = load_game_catalog()
+        for game_key, game_data in self._mod_scan_game_catalog.items():
+            self.mod_scan_game_combo.addItem(str(game_data.get("name") or game_key), game_key)
+        self.mod_scan_game_combo.addItem("직접 입력 / 목록에 없는 게임", "__custom__")
+        self.mod_scan_game_combo.currentIndexChanged.connect(self._mod_scan_game_changed)
+        game_row.addWidget(self.mod_scan_game_combo, 1)
+        scan_panel_layout.addLayout(game_row)
+        scan_panel_layout.addWidget(QLabel("자동 생성된 검색어 (필요하면 수정 가능)"))
         self.mod_scan_queries = QPlainTextEdit()
         self.mod_scan_queries.setPlaceholderText(
-            "예: Tifa Lockhart, 2B, Raiden Shogun\n"
-            "쉼표, 세미콜론 또는 줄바꿈으로 여러 이름을 입력할 수 있습니다."
+            "게임을 선택하면 캐릭터 이름과 다국어 별칭이 자동으로 채워집니다.\n"
+            "목록에 없는 캐릭터나 별칭은 직접 추가할 수 있습니다."
         )
-        self.mod_scan_queries.setMaximumHeight(76)
+        self.mod_scan_queries.setMaximumHeight(96)
         scan_panel_layout.addWidget(self.mod_scan_queries)
 
         scan_options = QHBoxLayout()
@@ -934,18 +947,18 @@ class MainWindow(QMainWindow):
         scan_options.addWidget(QLabel("검색어당 페이지"))
         self.mod_scan_pages = QSpinBox()
         self.mod_scan_pages.setRange(1, 20)
-        self.mod_scan_pages.setValue(5)
+        self.mod_scan_pages.setValue(1)
         self.mod_scan_pages.setSuffix("페이지/검색어")
         scan_options.addWidget(self.mod_scan_pages)
         scan_options.addStretch()
         scan_panel_layout.addLayout(scan_options)
 
         scan_actions = QHBoxLayout()
-        self.mod_scan_button = QPushButton("후보 제작자 자동 탐색")
+        self.mod_scan_button = QPushButton("선택한 게임 제작자 자동 탐색")
         self.mod_scan_button.setObjectName("Primary")
         self.mod_scan_button.clicked.connect(self.scan_mod_creator_candidates)
         scan_actions.addWidget(self.mod_scan_button)
-        self.mod_scan_status = QLabel("기본 5페이지, 검색어당 최대 20페이지까지 확인합니다. INI 발견 근거는 이 PC에 저장됩니다.")
+        self.mod_scan_status = QLabel("게임별 캐릭터 별칭으로 검색합니다. 검색어당 기본 1페이지이며 필요하면 늘릴 수 있습니다.")
         self.mod_scan_status.setWordWrap(True)
         self.mod_scan_status.setObjectName("Subtle")
         scan_actions.addWidget(self.mod_scan_status, 1)
@@ -953,13 +966,12 @@ class MainWindow(QMainWindow):
         candidate_layout.addWidget(scan_panel)
 
         candidate_top = QHBoxLayout()
-        candidate_top.addWidget(QLabel("INI가 발견된 게시물을 올린 제작자"))
+        candidate_top.addWidget(QLabel("선택한 게임 검색어 및 INI 파일 근거가 있는 제작자 후보"))
         candidate_top.addStretch()
         candidate_refresh = QPushButton("목록 새로고침")
         candidate_refresh.clicked.connect(self._refresh_mod_candidates)
         candidate_top.addWidget(candidate_refresh)
         candidate_layout.addLayout(candidate_top)
-
         self.mod_candidate_list = QListWidget()
         self.mod_candidate_list.currentRowChanged.connect(self._mod_candidate_selected)
         candidate_layout.addWidget(self.mod_candidate_list, 1)
@@ -1409,10 +1421,29 @@ class MainWindow(QMainWindow):
 
         self._run_task(f"Pawchive 전체 탐색 {page_number}페이지 불러오는 중…", task, done, failed)
 
+    def _mod_scan_game_changed(self, _index: int) -> None:
+        game_key = self.mod_scan_game_combo.currentData()
+        if not game_key or game_key == "__custom__":
+            self.mod_scan_queries.clear()
+            if game_key == "__custom__":
+                self.mod_scan_status.setText(
+                    "목록에 없는 게임입니다. 게임명과 해당 게임 캐릭터 이름·별칭을 검색어에 입력하세요."
+                )
+            return
+        game = self._mod_scan_game_catalog.get(game_key, {})
+        terms = game_search_terms(game)
+        self.mod_scan_queries.setPlainText("\n".join(terms))
+        self.mod_scan_status.setText(
+            f"{game.get('name', game_key)} · 캐릭터/별칭 검색어 {len(terms)}개 준비 완료"
+        )
     def scan_mod_creator_candidates(self) -> None:
+        game_key = self.mod_scan_game_combo.currentData()
+        if not game_key:
+            QMessageBox.information(self, "게임 선택", "먼저 대상 게임을 선택해 주세요.")
+            return
         queries = parse_search_queries(self.mod_scan_queries.toPlainText())
         if not queries:
-            QMessageBox.information(self, "검색어 입력", "캐릭터 이름이나 영문 별칭을 입력해 주세요.")
+            QMessageBox.information(self, "검색어 입력", "게임의 캐릭터 이름이나 별칭을 추가해 주세요.")
             return
         if any(len(query) < 2 for query in queries):
             QMessageBox.information(self, "검색어 길이", "검색어는 2글자 이상 입력해 주세요.")
@@ -1431,7 +1462,7 @@ class MainWindow(QMainWindow):
 
         page_limit = self.mod_scan_pages.value()
         self.mod_scan_button.setEnabled(False)
-        self.mod_scan_status.setText("Pawchive 검색과 압축파일 검사를 준비하고 있습니다…")
+        self.mod_scan_status.setText("선택한 게임의 캐릭터·별칭으로 Pawchive를 검색하고 있습니다…")
 
         def task(report):
             with self._client() as client:
@@ -1473,7 +1504,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "제작자 후보 자동 탐색 실패", message)
 
         self._run_progress_task(
-            "모드 제작자 후보 자동 탐색 중…",
+            "게임별 모드 제작자 후보 자동 탐색 중…",
             task,
             done,
             failed,
