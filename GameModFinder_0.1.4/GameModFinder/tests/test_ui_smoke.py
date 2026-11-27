@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from pawchive_app import ui
 from pawchive_app.enhancements import install_ui_enhancements
-from pawchive_app.models import Post
+from pawchive_app.models import Creator, Post
 
 
 install_ui_enhancements(ui)
@@ -83,8 +83,10 @@ class DesktopSmokeTests(unittest.TestCase):
             "service": "fanbox",
             "user": "creator-1",
             "title": "RAR 첨부 게시물",
-            "file": {"name": "character-pack.rar", "path": "/data/gh/opaque-download"},
-            "attachments": [],
+            "file": {"name": "preview.jpg", "path": "/data/gh/preview.jpg"},
+            "attachments": [
+                {"name": "character-pack.rar", "path": None, "deferred": True},
+            ],
         })
         with patch.object(ui.PostBrowser, "_thumbnail_url_for_post", return_value=""):
             browser.set_posts([image_only, post, rar_post])
@@ -139,6 +141,42 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(browser.stack.currentWidget(), browser.list_page)
         browser.close()
 
+
+    def test_creator_selection_does_not_start_bulk_metadata_hydration(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {"APPDATA": temp_dir, "LOCALAPPDATA": temp_dir}
+        ):
+            with patch.object(ui.MainWindow, "_load_creators"), patch.object(
+                ui.MainWindow, "_load_following_local"
+            ):
+                window = MainWindow()
+
+            creator = Creator(service="fanbox", creator_id="creator-rar", name="RAR Creator")
+            window.database.save_creator(creator)
+            window.database.follow(creator.service, creator.creator_id)
+            window.database.save_posts([Post.from_api({
+                "id": "cached-deferred-rar",
+                "service": "fanbox",
+                "user": creator.creator_id,
+                "title": "Cached deferred RAR",
+                "attachments": [
+                    {"name": "sample.rar", "deferred": True},
+                ],
+            })])
+            item = ui.QListWidgetItem("RAR Creator")
+            item.setData(ui.Qt.UserRole, (creator.service, creator.creator_id))
+            window.creator_list.addItem(item)
+
+            with patch.object(window, "_load_creator_tags"), patch.object(
+                window, "_run_task"
+            ) as run_task:
+                window._creator_selected(0)
+
+            run_task.assert_not_called()
+            self.assertEqual(len(window.creator_browser.posts), 1)
+            self.assertEqual(window.creator_browser.posts[0].files[0].name, "sample.rar")
+            window.close()
+            self.app.processEvents()
 
     def test_post_browser_appends_next_page_without_resetting_local_search(self):
         first = Post.from_api({
