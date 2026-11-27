@@ -16,7 +16,7 @@ from unittest.mock import patch
 from pawchive_app import downloads
 from pawchive_app.api import PawchiveClient
 from pawchive_app.archive_analysis import ArchiveInspectionError, analyze_archive_for_ini
-from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
+from pawchive_app.downloads import (DownloadError, _curl_transfer, download_file, extract_archive_and_remove, fetch_thumbnail_bytes, resolve_file_url, resolve_thumbnail_url, safe_extract_zip, safe_extract_archive)
 from pawchive_app.enhancements import pawchive_image_url
 from pawchive_app.models import (Creator, Post, extract_mega_links_from_post_html, parse_creator_url, post_matches_search_fields)
 from pawchive_app.repository import LocalRepository
@@ -999,6 +999,56 @@ class DownloadSafetyTests(unittest.TestCase):
             extracted = safe_extract_zip(archive, output)
             self.assertEqual(len(extracted), 1)
             self.assertEqual((output / "folder" / "mod.txt").read_text(), "safe")
+
+    def test_downloaded_zip_is_extracted_and_original_archive_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "sample-mod.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("ModFolder/mod.ini", "[Mod]")
+
+            extraction_dir, extracted = extract_archive_and_remove(archive)
+
+            self.assertFalse(archive.exists())
+            self.assertEqual(extraction_dir, Path(tmp) / "sample-mod_extracted")
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual(
+                (extraction_dir / "ModFolder" / "mod.ini").read_text(),
+                "[Mod]",
+            )
+
+    def test_non_archive_download_is_left_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            download = Path(tmp) / "readme.txt"
+            download.write_text("not an archive")
+
+            extraction_dir, extracted = extract_archive_and_remove(download)
+
+            self.assertIsNone(extraction_dir)
+            self.assertEqual(extracted, [])
+            self.assertTrue(download.exists())
+
+    def test_downloaded_7z_is_extracted_and_original_archive_removed(self):
+        try:
+            import py7zr
+        except ImportError:
+            self.skipTest("py7zr is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "mod.ini"
+            source.write_text("[Mod]")
+            archive = Path(tmp) / "sample-mod.7z"
+            with py7zr.SevenZipFile(archive, mode="w") as seven:
+                seven.write(source, arcname="ModFolder/mod.ini")
+
+            extraction_dir, extracted = extract_archive_and_remove(archive)
+
+            self.assertFalse(archive.exists())
+            self.assertEqual(extraction_dir, Path(tmp) / "sample-mod_extracted")
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual(
+                (extraction_dir / "ModFolder" / "mod.ini").read_text(),
+                "[Mod]",
+            )
 
     def test_zip_traversal_is_rejected_before_extraction(self):
         with tempfile.TemporaryDirectory() as tmp:
