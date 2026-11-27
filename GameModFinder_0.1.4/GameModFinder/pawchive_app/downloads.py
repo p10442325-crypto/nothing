@@ -864,7 +864,14 @@ def download_mega_file(
 
         key_bytes = a32_to_str(decrypt_key)
         iv_bytes = a32_to_str((iv_words[0], iv_words[1], iv_words[0], iv_words[1]))
-        counter_value = (iv_words[0] << 32) + (iv_words[1] << 64)
+        # MEGA CTR uses the 64-bit IV in the HIGH 64 bits of the 128-bit
+        # counter block, followed by 64 zero bits. Keep the same layout as
+        # mega.py-v2: ((iv0 << 32) + iv1) << 64. The previous expression
+        # placed the IV words in the wrong byte positions and produced files
+        # that decrypted to garbage, which then failed the file-MAC check.
+        counter_value = int.from_bytes(
+            a32_to_str((iv_words[0], iv_words[1], 0, 0)), "big"
+        )
         counter = Counter.new(128, initial_value=counter_value)
         stream_cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
         running_mac = b"\x00" * 16
